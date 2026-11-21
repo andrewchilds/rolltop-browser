@@ -1501,6 +1501,84 @@
     return next;
   }
 
+  // extension/lib/workspace.js
+  var FORMAT = "rolltop-workspace";
+  var VERSION = 1;
+  var isWeb = (url) => typeof url === "string" && /^https?:\/\//i.test(url);
+  var records = (x) => Array.isArray(x) ? x.filter((v) => v && typeof v === "object") : [];
+  var idOf = (x) => typeof x === "string" && x ? x : null;
+  function readWorkspace(data) {
+    if (!data || typeof data !== "object" || data.format !== FORMAT) {
+      throw new Error("This is not a Rolltop workspace file.");
+    }
+    if (!(data.version >= 1)) throw new Error("This workspace file has no version.");
+    if (data.version > VERSION) {
+      throw new Error("This workspace file was made by a newer version of Rolltop.");
+    }
+    const groups = records(data.groups).filter((g) => idOf(g.id) && clean(g.name, 40)).map((g) => ({
+      id: g.id,
+      name: clean(g.name, 40),
+      label: clean(g.label, 14) || "Other",
+      hue: Number.isFinite(g.hue) ? Math.round((g.hue % 360 + 360) % 360) : 0,
+      parentId: idOf(g.parentId),
+      order: Number.isFinite(g.order) ? g.order : 0,
+      pinned: !!g.pinned,
+      collapsed: !!g.collapsed,
+      ...clean(g.site, 100) ? { site: clean(g.site, 100) } : {},
+      ...g.manual ? { manual: true } : {},
+      ...g.manualLabel ? { manualLabel: true } : {}
+    }));
+    const tabs = records(data.tabs).filter((t) => isWeb(t.url)).map((t) => ({
+      url: t.url,
+      title: String(t.title || "").slice(0, 300),
+      groupId: idOf(t.groupId),
+      pinned: !!t.pinned,
+      pinRow: t.pinned && Number.isInteger(t.pinRow) && t.pinRow >= 0 ? t.pinRow : null,
+      ...clean(t.name, 80) ? { name: clean(t.name, 80) } : {},
+      ...t.manual ? { manual: true } : {}
+    }));
+    return { groups, tabs };
+  }
+  function mergeGroups(groups, counters, incoming) {
+    const next = {};
+    Object.values(groups).forEach((g) => {
+      next[g.id] = { ...g };
+    });
+    const c = { ...counters };
+    const ids = /* @__PURE__ */ new Map();
+    const byId = new Map(incoming.map((g) => [g.id, g]));
+    const created = [];
+    const place = (g, trail) => {
+      if (ids.has(g.id)) return ids.get(g.id);
+      const parent = g.parentId !== g.id && !trail.has(g.parentId) ? byId.get(g.parentId) : null;
+      let parentId = parent ? place(parent, new Set(trail).add(g.id)) : null;
+      while (parentId && chain(next, parentId).length >= MAX_DEPTH) {
+        parentId = next[parentId].parentId || null;
+      }
+      const pinned = !parentId && g.pinned;
+      const twin = Object.values(next).find(
+        (x) => (x.parentId || null) === parentId && x.name.toLowerCase() === g.name.toLowerCase() && (parentId || !!x.pinned === pinned)
+      );
+      if (twin) {
+        ids.set(g.id, twin.id);
+        return twin.id;
+      }
+      const id = "g" + c.nextGroup;
+      c.nextGroup += 1;
+      if (!parentId) c.topLevel += 1;
+      next[id] = { ...g, id, parentId, pinned };
+      created.push([g.order, id]);
+      ids.set(g.id, id);
+      return id;
+    };
+    incoming.forEach((g) => place(g, /* @__PURE__ */ new Set()));
+    let order = Math.max(0, ...Object.values(groups).map((g) => g.order || 0));
+    created.sort((a, b) => a[0] - b[0]).forEach(([, id]) => {
+      next[id].order = ++order;
+    });
+    return { groups: next, counters: c, ids, added: created.length };
+  }
+
   // src/background/core.js
   var DEFAULTS = { auto: true, archiveDays: 14, collapseHours: 8, apiKey: "", model: "claude-opus-5-5" };
   var ARCHIVE_CAP = 1e3;
@@ -1549,6 +1627,7 @@
     const ports = /* @__PURE__ */ new Set();
     const status = { sorting: false, error: "" };
     let running = null;
+    let importing = 0;
     let menu = { port: null, tabId: null, groupId: null };
     const debounce = (fn, ms) => {
       let timer = null;
@@ -1597,6 +1676,7 @@
       }
     }
     function gc() {
+      if (importing) return;
       const used = /* @__PURE__ */ new Set();
       assign.forEach((a) => used.add(a.groupId));
       state.archive.forEach((a) => a.groupId && used.add(a.groupId));
@@ -1662,6 +1742,7 @@
       return !!a.manual || a.host === hostOf2(tab.url) || isHardPinned(state.groups, a.groupId);
     }
     function consider(tab) {
+      if (importing) return;
       if (!isSortable(tab) || tab.status === "loading" || isFiled(tab)) return;
       queue.add(tab.id);
       scheduleClassify();
@@ -1839,11 +1920,11 @@
       save();
       await browser2.tabs.remove(tabs.map((t) => t.id));
     }
-    async function reopen(records, windowId) {
-      const ids = new Set(records.map((r) => r.id));
+    async function reopen(records2, windowId) {
+      const ids = new Set(records2.map((r) => r.id));
       state.archive = state.archive.filter((a) => !ids.has(a.id));
       let first = true;
-      for (const r of records) {
+      for (const r of records2) {
         const tab = await browser2.tabs.create({ url: r.url, windowId, active: first });
         first = false;
         if (r.name) setName(tab.id, r.name);
@@ -1896,6 +1977,73 @@
       await archiveTabs(stale);
       gc();
       changed();
+    }
+    async function exportWorkspace() {
+      const tabs = (await browser2.tabs.query({})).filter(isSortable).sort((a, b) => a.windowId - b.windowId || a.index - b.index);
+      const used = /* @__PURE__ */ new Set();
+      const out = tabs.map((t) => {
+        const a = assign.get(t.id);
+        const filed = a && state.groups[a.groupId] ? a : null;
+        if (filed) chain(state.groups, filed.groupId).forEach((id) => used.add(id));
+        return {
+          url: t.url,
+          title: t.title || "",
+          groupId: filed ? filed.groupId : null,
+          pinned: !!t.pinned,
+          ...t.pinned && pinRows.has(t.id) ? { pinRow: pinRows.get(t.id) } : {},
+          ...names.has(t.id) ? { name: names.get(t.id) } : {},
+          ...filed?.manual ? { manual: true } : {}
+        };
+      });
+      return {
+        format: FORMAT,
+        version: VERSION,
+        exportedAt: now(),
+        // Groups kept alive only by archived tabs are left out.
+        groups: Object.values(state.groups).filter((g) => used.has(g.id)).map(({ idleCollapsedAt, ...g }) => g),
+        tabs: out
+      };
+    }
+    async function importWorkspace(data, windowId) {
+      const ws = readWorkspace(data);
+      const result = { groups: 0, tabs: 0, skipped: 0, failed: 0 };
+      const key = (url, groupId) => url + "\n" + (groupId || "");
+      importing += 1;
+      try {
+        const merged = mergeGroups(state.groups, state.counters, ws.groups);
+        state.groups = merged.groups;
+        state.counters = merged.counters;
+        result.groups = merged.added;
+        const groupFor = (id) => merged.ids.get(id) || null;
+        const here = await browser2.tabs.query({});
+        const open = new Set(here.map((t) => key(t.url, assign.get(t.id)?.groupId)));
+        const rowBase = 1 + Math.max(-1, ...here.filter((t) => t.pinned && (windowId == null || t.windowId === windowId)).map((t) => pinRows.get(t.id) ?? -1));
+        for (const t of ws.tabs) {
+          const groupId = groupFor(t.groupId);
+          if (open.has(key(t.url, groupId))) {
+            result.skipped += 1;
+            continue;
+          }
+          let tab;
+          try {
+            tab = await browser2.tabs.create(t.pinned ? { url: t.url, windowId, pinned: true, active: false } : { url: t.url, windowId, active: false, discarded: true, ...t.title ? { title: t.title } : {} });
+          } catch {
+            result.failed += 1;
+            continue;
+          }
+          open.add(key(t.url, groupId));
+          if (groupId) setAssign(tab.id, groupId, hostOf2(t.url), !!t.manual);
+          if (t.name) setName(tab.id, t.name);
+          if (t.pinRow != null) setPinRow(tab.id, rowBase + t.pinRow);
+          result.tabs += 1;
+        }
+      } finally {
+        importing -= 1;
+      }
+      gc();
+      changed();
+      (await browser2.tabs.query({})).forEach(consider);
+      return result;
     }
     async function placeBeside(tab, nearTabId, after) {
       const near = await browser2.tabs.get(nearTabId);
@@ -2171,7 +2319,11 @@
         });
         push();
       });
-      browser2.runtime.onMessage.addListener((msg) => handle(msg).catch(reportError));
+      browser2.runtime.onMessage.addListener((msg) => {
+        if (msg.type === "exportWorkspace") return exportWorkspace();
+        if (msg.type === "importWorkspace") return importWorkspace(msg.data, msg.windowId);
+        return handle(msg).catch(reportError);
+      });
       browser2.storage.onChanged.addListener((changes, area) => {
         if (area !== "local" || !changes.settings) return;
         state.settings = { ...DEFAULTS, ...changes.settings.newValue || {} };
@@ -2197,6 +2349,8 @@
       tidy,
       searchArchive,
       moveTargets,
+      exportWorkspace,
+      importWorkspace,
       menuClick: (itemId, tabId) => menuClick(itemId, tabId).catch(reportError),
       state,
       assign,
@@ -2288,7 +2442,7 @@
   init_errors();
 
   // node_modules/@anthropic-ai/sdk/version.mjs
-  var VERSION = "1.11.0";
+  var VERSION2 = "1.11.0";
 
   // node_modules/@anthropic-ai/sdk/internal/detect-platform.mjs
   var isRunningInBrowser = () => {
@@ -2316,7 +2470,7 @@
     if (detectedPlatform === "deno") {
       return {
         "X-Stainless-Lang": "js",
-        "X-Stainless-Package-Version": VERSION,
+        "X-Stainless-Package-Version": VERSION2,
         "X-Stainless-OS": normalizePlatform(Deno.build.os),
         "X-Stainless-Arch": normalizeArch(Deno.build.arch),
         "X-Stainless-Runtime": "deno",
@@ -2326,7 +2480,7 @@
     if (typeof EdgeRuntime !== "undefined") {
       return {
         "X-Stainless-Lang": "js",
-        "X-Stainless-Package-Version": VERSION,
+        "X-Stainless-Package-Version": VERSION2,
         "X-Stainless-OS": "Unknown",
         "X-Stainless-Arch": `other:${EdgeRuntime}`,
         "X-Stainless-Runtime": "edge",
@@ -2336,7 +2490,7 @@
     if (detectedPlatform === "node") {
       return {
         "X-Stainless-Lang": "js",
-        "X-Stainless-Package-Version": VERSION,
+        "X-Stainless-Package-Version": VERSION2,
         "X-Stainless-OS": normalizePlatform(globalThis.process.platform ?? "unknown"),
         "X-Stainless-Arch": normalizeArch(globalThis.process.arch ?? "unknown"),
         "X-Stainless-Runtime": "node",
@@ -2347,7 +2501,7 @@
     if (browserInfo) {
       return {
         "X-Stainless-Lang": "js",
-        "X-Stainless-Package-Version": VERSION,
+        "X-Stainless-Package-Version": VERSION2,
         "X-Stainless-OS": "Unknown",
         "X-Stainless-Arch": "unknown",
         "X-Stainless-Runtime": `browser:${browserInfo.browser}`,
@@ -2356,7 +2510,7 @@
     }
     return {
       "X-Stainless-Lang": "js",
-      "X-Stainless-Package-Version": VERSION,
+      "X-Stainless-Package-Version": VERSION2,
       "X-Stainless-OS": "Unknown",
       "X-Stainless-Arch": "unknown",
       "X-Stainless-Runtime": "unknown",
@@ -2543,7 +2697,7 @@
   };
 
   // node_modules/@opentelemetry/api/dist/version.mjs
-  var VERSION2 = "1.10.0";
+  var VERSION3 = "1.10.0";
 
   // node_modules/@opentelemetry/api/dist/internal/semver.mjs
   var re = /^(\d+)\.(\d+)\.(\d+)(-(.+))?$/;
@@ -2590,15 +2744,15 @@
       return _reject(globalVersion);
     };
   }
-  var isCompatible = _makeCompatibilityCheck(VERSION2);
+  var isCompatible = _makeCompatibilityCheck(VERSION3);
 
   // node_modules/@opentelemetry/api/dist/internal/global-utils.mjs
-  var major = VERSION2.split(".")[0];
+  var major = VERSION3.split(".")[0];
   var GLOBAL_OPENTELEMETRY_API_KEY = /* @__PURE__ */ Symbol.for(`opentelemetry.js.api.${major}`);
   var _global = typeof globalThis === "object" ? globalThis : typeof self === "object" ? self : typeof window === "object" ? window : typeof global === "object" ? global : {};
   function _makeGlobalApi() {
     return Object.defineProperty({}, "version", {
-      value: VERSION2,
+      value: VERSION3,
       enumerable: true,
       writable: false,
       configurable: false
@@ -2613,12 +2767,12 @@
       return false;
     }
     if (api.version !== "1.10.0") {
-      const err = /* @__PURE__ */ new Error(`@opentelemetry/api: Registration of version v${api.version} for ${type} does not match previously registered API v${VERSION2}`);
+      const err = /* @__PURE__ */ new Error(`@opentelemetry/api: Registration of version v${api.version} for ${type} does not match previously registered API v${VERSION3}`);
       diag2.error(err.stack || err.message);
       return false;
     }
     api[type] = instance;
-    diag2.debug(`@opentelemetry/api: Registered a global for ${type} v${VERSION2}.`);
+    diag2.debug(`@opentelemetry/api: Registered a global for ${type} v${VERSION3}.`);
     return true;
   }
   var _compatibleGlobalApi;
@@ -2632,7 +2786,7 @@
     return api[type];
   }
   function unregisterGlobal(type, diag2) {
-    diag2.debug(`@opentelemetry/api: Unregistering a global for ${type} v${VERSION2}.`);
+    diag2.debug(`@opentelemetry/api: Unregistering a global for ${type} v${VERSION3}.`);
     const api = _global[GLOBAL_OPENTELEMETRY_API_KEY];
     if (api) delete api[type];
   }
@@ -26788,7 +26942,7 @@ Please migrate to a newer model. Visit https://docs.anthropic.com/en/docs/resour
           headers: {
             "Content-Type": "application/json",
             "anthropic-beta": `${OAUTH_API_BETA_HEADER},${FEDERATION_BETA_HEADER}`,
-            "User-Agent": config.userAgent || `anthropic-sdk-typescript/${VERSION} oidcFederationProvider`
+            "User-Agent": config.userAgent || `anthropic-sdk-typescript/${VERSION2} oidcFederationProvider`
           },
           body: JSON.stringify(body)
         });
@@ -26862,7 +27016,7 @@ Please migrate to a newer model. Visit https://docs.anthropic.com/en/docs/resour
           headers: {
             "Content-Type": "application/json",
             "anthropic-beta": OAUTH_API_BETA_HEADER,
-            "User-Agent": config.userAgent || `anthropic-sdk-typescript/${VERSION} userOAuthProvider`
+            "User-Agent": config.userAgent || `anthropic-sdk-typescript/${VERSION2} userOAuthProvider`
           },
           body: JSON.stringify(body)
         });
@@ -27292,7 +27446,7 @@ Please migrate to a newer model. Visit https://docs.anthropic.com/en/docs/resour
        * @internal
        */
       _instrumentationScope() {
-        return { version: VERSION };
+        return { version: VERSION2 };
       }
       /**
        * API Client for interfacing with the Anthropic API.
@@ -27628,7 +27782,7 @@ Please migrate to a newer model. Visit https://docs.anthropic.com/en/docs/resour
         return stringifyQuery(query);
       }
       getUserAgent() {
-        return `Anthropic/JS ${VERSION}`;
+        return `Anthropic/JS ${VERSION2}`;
       }
       makeStatusError(status, error, message, headers) {
         const body = error ?? {};
