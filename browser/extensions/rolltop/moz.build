@@ -5,3 +5,5 @@
 # extension/ is a built snapshot of the Rolltop repo's extension/ directory.
 # Refresh it with `npm run fork:sync` there; do not edit it here.
 JAR_MANIFESTS += ["jar.mn"]
+
+DIRS += ["distribution"]

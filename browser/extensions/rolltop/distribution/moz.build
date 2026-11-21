@@ -1,0 +1,17 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+# Add-ons shipped in the app's distribution/extensions directory. Firefox
+# copies each one into a new profile on first run as an ordinary add-on: it
+# appears in about:addons, updates from addons.mozilla.org and can be removed.
+# The file name must be the add-on's ID. These are the signed files from
+# addons.mozilla.org; refresh uBlock Origin with `npm run fork:ublock` in the
+# Rolltop repo.
+
+# distribution/ sits beside the binary, not under browser/.
+DIST_SUBDIR = ""
+
+FINAL_TARGET_FILES.distribution.extensions += [
+    "uBlock0@raymondhill.net.xpi",
+]
