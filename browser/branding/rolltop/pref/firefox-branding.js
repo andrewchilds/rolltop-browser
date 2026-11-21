@@ -117,6 +117,10 @@ pref("browser.preferences.moreFromMozilla", false);
 pref("signon.firefoxRelay.feature", "disabled");
 pref("identity.fxaccounts.toolbar.pxiToolbarEnabled", false);
 
+// Firefox accounts and Sync: no sign-in in the menu or in settings, and no
+// requests to Mozilla's account servers.
+pref("identity.fxaccounts.enabled", false);
+
 // Firefox onboarding, tours and post-update pages.
 pref("browser.aboutwelcome.enabled", false);
 pref("browser.preonboarding.enabled", false);
