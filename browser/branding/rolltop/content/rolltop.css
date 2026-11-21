@@ -21,6 +21,20 @@
   padding-block: var(--rolltop-toolbar-padding);
 }
 
+/* Toolbar spacing: window controls, then navigation, then the address bar,
+ * then the menu. */
+#nav-bar > .titlebar-buttonbox-container {
+  margin-inline-end: 20px;
+}
+
+#nav-bar #urlbar-container {
+  margin-inline-start: 12px;
+}
+
+#PanelUI-button {
+  margin-inline: 6px;
+}
+
 /* With the tab strip hidden, the stock toolbar keeps a drag spacer after the
  * menu button. The whole toolbar is already draggable. */
 #nav-bar > .titlebar-spacer {
