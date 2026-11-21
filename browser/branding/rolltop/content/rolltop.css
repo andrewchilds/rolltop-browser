@@ -8,11 +8,23 @@
 :root {
   --rolltop-gap: 6px;
   --rolltop-radius: 10px;
+  --rolltop-toolbar-padding: 4px;
 }
 
 /* One surface behind the toolbar, the sidebar and the gap around the page. */
 #navigator-toolbox {
   border-bottom-style: none;
+}
+
+/* A little more air above and below the toolbar's controls. */
+#nav-bar {
+  padding-block: var(--rolltop-toolbar-padding);
+}
+
+/* With the tab strip hidden, the stock toolbar keeps a drag spacer after the
+ * menu button. The whole toolbar is already draggable. */
+#nav-bar > .titlebar-spacer {
+  display: none;
 }
 
 #browser {
