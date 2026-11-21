@@ -30,3 +30,12 @@ pref("app.update.badgeWaitTime", 0);
 // Number of usages of the web console.
 // If this is less than 5, then pasting code into the web console is disabled
 pref("devtools.selfxss.count", 5);
+
+// Rolltop chrome. The tab list lives in the Rolltop sidebar, so the native tab
+// strip and most toolbar furniture are off by default.
+pref("rolltop.hideTabStrip", true);
+pref("browser.toolbars.bookmarks.visibility", "never");
+pref("extensions.unifiedExtensions.button.always_visible", false);
+pref("sidebar.revamp", false);
+// Open the Rolltop sidebar in windows that have no saved sidebar state.
+pref("sidebar.backupState", "{\"command\":\"tidy_tidy-browser_local-sidebar-action\",\"panelOpen\":true,\"launcherVisible\":false,\"launcherExpanded\":false}");

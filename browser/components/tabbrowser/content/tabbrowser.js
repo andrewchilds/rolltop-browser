@@ -10128,7 +10128,9 @@ var TabBarVisibility = {
     // To prevent tabs being lost, hiding the tabs toolbar should only work
     // when only a single tab is visible or tabs are displayed elsewhere.
     let hideTabsToolbar =
-      (isSingleTabWindow && hasSingleTab) || hasVerticalTabs;
+      (isSingleTabWindow && hasSingleTab) ||
+      hasVerticalTabs ||
+      Services.prefs.getBoolPref("rolltop.hideTabStrip", false);
 
     // We only want a non-customized titlebar for popups. It should not be the
     // case, but if a popup window contains more than one tab we re-enable

@@ -1,0 +1,53 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/* Rolltop's changes to the browser window. Imported last by
+ * browser-shared.css, so these rules win over the stock ones. */
+
+:root {
+  --rolltop-gap: 6px;
+  --rolltop-radius: 10px;
+}
+
+/* One surface behind the toolbar, the sidebar and the gap around the page. */
+#navigator-toolbox {
+  border-bottom-style: none;
+}
+
+#browser {
+  background-color: var(--toolbar-bgcolor, var(--toolbar-background-color));
+}
+
+/* The sidebar is the tab list: no title bar, switcher or close button. */
+#sidebar-header {
+  display: none;
+}
+
+#sidebar-box {
+  background-color: transparent;
+}
+
+#sidebar-splitter {
+  appearance: none;
+  border: none;
+  background: transparent;
+  width: var(--rolltop-gap);
+  min-width: var(--rolltop-gap);
+}
+
+/* The page sits in the frame as a rounded card. */
+:root:not([inDOMFullscreen]) #tabbrowser-tabbox {
+  margin: 0 var(--rolltop-gap) var(--rolltop-gap) 0;
+}
+
+:root:not([inDOMFullscreen]) #tabbrowser-tabpanels {
+  background: transparent;
+}
+
+:root:not([inDOMFullscreen]) .browserContainer {
+  overflow: clip;
+  border-radius: var(--rolltop-radius);
+  outline: 0.5px solid var(--chrome-content-separator-color);
+  box-shadow: var(--content-area-shadow);
+}
