@@ -87,6 +87,36 @@ pref("browser.discovery.enabled", false);
 pref("extensions.getAddons.showPane", false);
 pref("extensions.htmlaboutaddons.recommendations.enabled", false);
 
+// Address bar: trending searches from the search engine, and the prompt to opt
+// in to Mozilla's online suggestions. Suggestions for what you type stay on.
+pref("browser.urlbar.trending.featureGate", false);
+pref("browser.urlbar.suggest.trending", false);
+pref("browser.urlbar.suggest.realtimeOptIn", false);
+
+// New tab: Mozilla's default tiles (remote list and partner tiles) and the
+// pinned search-engine shortcuts. Shortcuts then show only sites you visit.
+pref("browser.topsites.useRemoteSetting", false);
+pref("browser.topsites.contile.enabled", false);
+pref("browser.newtabpage.activity-stream.default.sites", "");
+pref("browser.newtabpage.activity-stream.improvesearch.topSiteSearchShortcuts", false);
+
+// Third-party AI chatbot (sidebar, context menu, selection shortcuts), AI link
+// previews and Firefox's own AI tab grouping. Translations are untouched.
+pref("browser.ml.chat.enabled", false);
+pref("browser.ml.linkPreview.enabled", false);
+pref("browser.tabs.groups.smart.enabled", false);
+
+// Promotions for other Mozilla products: VPN, Focus, mobile, Relay, Monitor,
+// and the "More from Mozilla" settings pane.
+pref("browser.vpn_promo.enabled", false);
+pref("browser.promo.focus.enabled", false);
+pref("browser.promo.pin.enabled", false);
+pref("browser.contentblocking.report.show_mobile_app", false);
+pref("browser.contentblocking.report.hide_vpn_banner", true);
+pref("browser.preferences.moreFromMozilla", false);
+pref("signon.firefoxRelay.feature", "disabled");
+pref("identity.fxaccounts.toolbar.pxiToolbarEnabled", false);
+
 // Firefox onboarding, tours and post-update pages.
 pref("browser.aboutwelcome.enabled", false);
 pref("browser.preonboarding.enabled", false);
