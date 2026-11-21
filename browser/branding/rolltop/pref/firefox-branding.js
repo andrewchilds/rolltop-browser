@@ -39,3 +39,56 @@ pref("extensions.unifiedExtensions.button.always_visible", false);
 pref("sidebar.revamp", false);
 // Open the Rolltop sidebar in windows that have no saved sidebar state.
 pref("sidebar.backupState", "{\"command\":\"tidy_tidy-browser_local-sidebar-action\",\"panelOpen\":true,\"launcherVisible\":false,\"launcherExpanded\":false}");
+
+// Nothing below is needed for browsing. Each group turns off something that
+// reports to, or pulls promotional content from, Mozilla.
+
+// Telemetry and the data-reporting notice. Non-official builds already compile
+// telemetry upload out; these keep it off if that ever changes.
+pref("datareporting.healthreport.uploadEnabled", false);
+pref("datareporting.policy.dataSubmissionEnabled", false);
+pref("datareporting.usage.uploadEnabled", false);
+pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
+pref("datareporting.policy.firstRunURL", "");
+pref("termsofuse.bypassNotification", true);
+pref("toolkit.telemetry.unified", false);
+pref("toolkit.telemetry.archive.enabled", false);
+pref("toolkit.telemetry.server", "");
+pref("toolkit.telemetry.newProfilePing.enabled", false);
+pref("toolkit.telemetry.shutdownPingSender.enabled", false);
+pref("toolkit.telemetry.firstShutdownPing.enabled", false);
+pref("toolkit.telemetry.updatePing.enabled", false);
+pref("toolkit.telemetry.bhrPing.enabled", false);
+pref("browser.newtabpage.activity-stream.telemetry", false);
+
+// Studies and remotely delivered experiments.
+pref("app.shield.optoutstudies.enabled", false);
+pref("app.normandy.enabled", false);
+pref("app.normandy.api_url", "");
+pref("nimbus.rollouts.enabled", false);
+
+// Crash report submission.
+pref("browser.tabs.crashReporting.sendReport", false);
+pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
+pref("breakpad.reportURL", "");
+
+// Sponsored and recommended content: new tab, address bar, add-ons manager.
+pref("browser.newtabpage.activity-stream.showSponsored", false);
+pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);
+pref("browser.newtabpage.activity-stream.showSponsoredCheckboxes", false);
+pref("browser.newtabpage.activity-stream.feeds.section.topstories", false);
+pref("browser.newtabpage.activity-stream.showWeather", false);
+pref("browser.urlbar.quicksuggest.enabled", false);
+pref("browser.urlbar.suggest.quicksuggest.sponsored", false);
+pref("browser.urlbar.suggest.quicksuggest.nonsponsored", false);
+pref("browser.newtabpage.activity-stream.asrouter.userprefs.cfr.addons", false);
+pref("browser.newtabpage.activity-stream.asrouter.userprefs.cfr.features", false);
+pref("browser.discovery.enabled", false);
+pref("extensions.getAddons.showPane", false);
+pref("extensions.htmlaboutaddons.recommendations.enabled", false);
+
+// Firefox onboarding, tours and post-update pages.
+pref("browser.aboutwelcome.enabled", false);
+pref("browser.preonboarding.enabled", false);
+pref("browser.uitour.enabled", false);
+pref("browser.startup.homepage_override.mstone", "ignore");

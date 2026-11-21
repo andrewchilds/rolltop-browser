@@ -7,3 +7,8 @@
 # Artifact builds cannot set this: they reuse Mozilla's prebuilt `firefox`
 # binary, which has the Firefox name compiled in.
 ac_add_options --with-app-basename=Rolltop
+
+# No update checks against Mozilla's servers and no crash reports to Mozilla.
+# Rolltop has neither an update server nor a crash-report server yet.
+ac_add_options --disable-updater
+ac_add_options --disable-crashreporter
