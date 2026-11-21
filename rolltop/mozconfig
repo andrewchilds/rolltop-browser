@@ -1,3 +1,4 @@
 # Shared Rolltop build options. The top-level mozconfig is ignored by
 # upstream's .gitignore; it sources this file and adds local-only options.
 mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-rolltop
+ac_add_options --with-branding=browser/branding/rolltop

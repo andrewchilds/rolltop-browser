@@ -1,0 +1,9 @@
+# Full (non-artifact) build. Use by making the top-level mozconfig source this
+# file instead of rolltop/mozconfig.
+. "$topsrcdir/rolltop/mozconfig"
+
+# Names the binary and the profile directory after Rolltop, so the app does
+# not share ~/Library/Application Support/Firefox with a real Firefox.
+# Artifact builds cannot set this: they reuse Mozilla's prebuilt `firefox`
+# binary, which has the Firefox name compiled in.
+ac_add_options --with-app-basename=Rolltop
