@@ -9,6 +9,7 @@ DIRS += [
     "pictureinpicture",
     "search-detection",
     "newtab",
+    "rolltop",
 ]
 
 JAR_MANIFESTS += ["jar.mn"]
