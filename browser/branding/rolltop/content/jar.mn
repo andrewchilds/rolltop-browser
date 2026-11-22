@@ -4,6 +4,8 @@
 
 browser.jar:
 % content branding %content/branding/ contentaccessible=yes
+% override chrome://global/skin/illustrations/no-connection.svg chrome://branding/content/about-logo.svg
+% override chrome://global/skin/illustrations/security-error.svg chrome://branding/content/about-logo.svg
   content/branding/about.png
   content/branding/about-logo.png
   content/branding/about-logo.svg
@@ -21,3 +23,4 @@ browser.jar:
   content/branding/icon128.png                   (../default128.png)
   content/branding/aboutDialog.css
   content/branding/rolltop.css
+  content/branding/rolltop-neterror.css

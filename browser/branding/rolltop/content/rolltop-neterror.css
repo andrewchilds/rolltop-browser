@@ -1,0 +1,9 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/* Error pages: jar.mn swaps Mozilla's illustrations for the logo, about-logo.svg.
+   Draw it larger than upstream's 8.75em and 13em. */
+.felt-privacy-container .img-container > img {
+  width: 16em;
+}
