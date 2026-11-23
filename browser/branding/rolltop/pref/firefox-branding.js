@@ -38,7 +38,7 @@ pref("browser.toolbars.bookmarks.visibility", "never");
 pref("extensions.unifiedExtensions.button.always_visible", false);
 pref("sidebar.revamp", false);
 // Open the Rolltop sidebar in windows that have no saved sidebar state.
-pref("sidebar.backupState", "{\"command\":\"tidy_tidy-browser_local-sidebar-action\",\"panelOpen\":true,\"launcherVisible\":false,\"launcherExpanded\":false}");
+pref("sidebar.backupState", "{\"command\":\"rolltop_rolltop-browser_local-sidebar-action\",\"panelOpen\":true,\"launcherVisible\":false,\"launcherExpanded\":false}");
 
 // Nothing below is needed for browsing. Each group turns off something that
 // reports to, or pulls promotional content from, Mozilla.
