@@ -2167,6 +2167,14 @@ pref("nimbus.profilesdatastoreservice.sync.enabled", true);
   pref("nimbus.telemetry.targetingContextEnabled", true);
 #endif
 
+// Artifact builds download a XUL compiled with official branding, which
+// launches "Firefox GPU Helper" and "Firefox Media Plugin Helper". The local
+// bundle names them after its own branding, so use plugin-container instead.
+#if defined(MOZ_ARTIFACT_BUILDS) && defined(XP_MACOSX)
+  pref("layers.gpu-process-executable.enabled", false);
+  pref("media.plugin_helper_process.enabled", false);
+#endif
+
 // Enable Rollouts by default.
 pref("nimbus.rollouts.enabled", true);
 
