@@ -1660,7 +1660,9 @@ this.tabs = class extends ExtensionAPIPersistent {
               }
             }
           }
-          if (hidden.length) {
+          // Built-in add-ons, the Rolltop sidebar among them, hide tabs without
+          // the warning or the all-tabs button.
+          if (hidden.length && !extension.isPrivileged) {
             let win = Services.wm.getMostRecentWindow("navigator:browser");
 
             // Before showing the hidden tabs warning,
