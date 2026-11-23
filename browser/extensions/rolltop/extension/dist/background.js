@@ -1580,7 +1580,7 @@
   }
 
   // src/background/core.js
-  var DEFAULTS = { auto: true, archiveDays: 14, collapseHours: 8, apiKey: "", model: "claude-opus-5-5" };
+  var DEFAULTS = { auto: true, archiveDays: 14, collapseHours: 8, apiKey: "", model: "claude-haiku-5-5" };
   var ARCHIVE_CAP = 1e3;
   var BATCH = 40;
   var SEARCH_LIMIT = 50;
