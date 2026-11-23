@@ -1263,7 +1263,7 @@
   var node_browser_exports2 = {};
   __export(node_browser_exports2, {
     child_process: () => child_process,
-    crypto: () => crypto,
+    crypto: () => crypto2,
     fs: () => fs,
     os: () => os,
     path: () => path2,
@@ -1279,12 +1279,12 @@
       }
     });
   }
-  var child_process, crypto, fs, os, path2, stream, util;
+  var child_process, crypto2, fs, os, path2, stream, util;
   var init_node_browser2 = __esm({
     "node_modules/@anthropic-ai/sdk/internal/node.browser.mjs"() {
       init_error();
       child_process = /* @__PURE__ */ unavailable("child_process");
-      crypto = /* @__PURE__ */ unavailable("crypto");
+      crypto2 = /* @__PURE__ */ unavailable("crypto");
       fs = /* @__PURE__ */ unavailable("fs");
       os = /* @__PURE__ */ unavailable("os");
       path2 = /* @__PURE__ */ unavailable("path");
@@ -1315,7 +1315,7 @@
       if (!map.has(key)) map.set(key, []);
       map.get(key).push(g);
     }
-    map.forEach((list) => list.sort((a, b) => a.order - b.order));
+    map.forEach((list2) => list2.sort((a, b) => a.order - b.order));
     return map;
   }
   function subtree(groups, id, map = childMap(groups)) {
@@ -1409,7 +1409,7 @@
     return { newGroups, assignments, renames: [] };
   }
   var clean = (s, max) => String(s || "").replace(/\s+/g, " ").trim().slice(0, max);
-  function applyPlan(groups, counters, plan, validTabIds) {
+  function applyPlan(groups, counters, plan, validTabIds, makeId) {
     const next = {};
     Object.values(groups).forEach((g) => {
       next[g.id] = { ...g };
@@ -1441,7 +1441,7 @@
           refs.set(g.ref, twin.id);
           continue;
         }
-        const id = "g" + c.nextGroup;
+        const id = makeId ? makeId() : "g" + c.nextGroup;
         let hue;
         if (parentId) {
           const siblings = Object.values(next).filter((x) => x.parentId === parentId).length;
@@ -1539,7 +1539,7 @@
     }));
     return { groups, tabs };
   }
-  function mergeGroups(groups, counters, incoming) {
+  function mergeGroups(groups, counters, incoming, makeId) {
     const next = {};
     Object.values(groups).forEach((g) => {
       next[g.id] = { ...g };
@@ -1563,7 +1563,7 @@
         ids.set(g.id, twin.id);
         return twin.id;
       }
-      const id = "g" + c.nextGroup;
+      const id = makeId ? makeId() : "g" + c.nextGroup;
       c.nextGroup += 1;
       if (!parentId) c.topLevel += 1;
       next[id] = { ...g, id, parentId, pinned };
@@ -1579,6 +1579,140 @@
     return { groups: next, counters: c, ids, added: created.length };
   }
 
+  // extension/lib/store.js
+  var STORE_VERSION = 2;
+  var BACKUP_FORMAT = "rolltop-backup";
+  var SNAPSHOT_DAYS = 7;
+  var SNAP_PREFIX = "snap:";
+  var SNAP_BEFORE_RESTORE = SNAP_PREFIX + "before-restore";
+  var LEGACY_KEY = "legacy-v1";
+  var LEGACY_KEYS = ["groups", "archive", "counters"];
+  var wsKey = (id) => "ws:" + id;
+  var archiveKey = (id) => "archive:" + id;
+  var snapKey = (day) => SNAP_PREFIX + day;
+  function dayOf(ms) {
+    const d = new Date(ms);
+    return [d.getFullYear(), d.getMonth() + 1, d.getDate()].map((n) => String(n).padStart(2, "0")).join("-");
+  }
+  function newSpace(id, name) {
+    return { id, name, groups: {}, tabs: [], counters: { nextGroup: 1, topLevel: 0 } };
+  }
+  var isObject = (x) => !!x && typeof x === "object" && !Array.isArray(x);
+  var list = (x) => Array.isArray(x) ? x.filter(isObject) : [];
+  var text = (x) => typeof x === "string" ? x : "";
+  function normalize({ meta, spaces, archives, log }, makeId) {
+    const out = { meta: { version: STORE_VERSION, order: [], current: null }, spaces: {}, archives: {}, log: list(log) };
+    const wanted = Array.isArray(meta?.order) ? meta.order.filter((id) => typeof id === "string") : [];
+    const given = isObject(spaces) ? spaces : {};
+    const ids = [.../* @__PURE__ */ new Set([...wanted, ...Object.keys(given)])];
+    for (const id of ids) {
+      const s = given[id];
+      if (!isObject(s)) continue;
+      const groups = {};
+      for (const g of Object.values(isObject(s.groups) ? s.groups : {})) {
+        if (isObject(g) && text(g.id) && text(g.name)) groups[g.id] = { label: "Other", hue: 0, order: 0, ...g, parentId: text(g.parentId) || null };
+      }
+      const seen = /* @__PURE__ */ new Set();
+      const tabs = list(s.tabs).filter((r) => text(r.uid) && !seen.has(r.uid) && seen.add(r.uid)).map((r) => ({
+        ...r,
+        url: text(r.url),
+        title: text(r.title),
+        favIconUrl: text(r.favIconUrl),
+        groupId: groups[r.groupId] ? r.groupId : null,
+        favorite: !!r.favorite
+      }));
+      out.spaces[id] = {
+        id,
+        name: text(s.name).trim() || "Workspace",
+        groups,
+        tabs,
+        counters: { nextGroup: 1, topLevel: 0, ...isObject(s.counters) ? s.counters : {} }
+      };
+      out.archives[id] = list(isObject(archives) ? archives[id] : null).filter((a) => text(a.id) && text(a.url)).map((a) => ({ ...a, groupId: text(a.groupId) || null }));
+      out.meta.order.push(id);
+    }
+    if (!out.meta.order.length) {
+      const id = makeId("w");
+      out.spaces[id] = newSpace(id, "Home");
+      out.archives[id] = [];
+      out.meta.order.push(id);
+    }
+    out.meta.current = out.spaces[meta?.current] ? meta.current : out.meta.order[0];
+    return out;
+  }
+  function loadStore(stored, makeId) {
+    const meta = stored.meta;
+    if (isObject(meta) && meta.version > STORE_VERSION) {
+      throw new Error("Rolltop's saved data is from a newer version of Rolltop.");
+    }
+    if (isObject(meta)) {
+      const spaces = {};
+      const archives = {};
+      for (const [key, value] of Object.entries(stored)) {
+        if (key.startsWith("ws:")) spaces[key.slice(3)] = value;
+        else if (key.startsWith("archive:")) archives[key.slice(8)] = value;
+      }
+      return { ...normalize({ meta, spaces, archives, log: stored.log }, makeId), legacy: false };
+    }
+    const id = makeId("w");
+    const groups = isObject(stored.groups) ? stored.groups : {};
+    for (const g of Object.values(groups)) {
+      const root = groups[chain(groups, g.id)[0]];
+      if (!g.pinned || root === g) continue;
+      root.pinned = true;
+      g.pinned = false;
+    }
+    const space = { ...newSpace(id, "Home"), groups, counters: { nextGroup: 1, topLevel: 0, ...stored.counters || {} } };
+    delete space.counters.nextArchive;
+    const doc = normalize({
+      meta: { order: [id], current: id },
+      spaces: { [id]: space },
+      archives: { [id]: stored.archive },
+      log: stored.log
+    }, makeId);
+    return { ...doc, legacy: true };
+  }
+  function toKeys(doc) {
+    const keys = { meta: doc.meta, log: doc.log };
+    for (const id of doc.meta.order) {
+      keys[wsKey(id)] = doc.spaces[id];
+      keys[archiveKey(id)] = doc.archives[id] || [];
+    }
+    return keys;
+  }
+  var isDocKey = (key) => key === "meta" || key === "log" || key.startsWith("ws:") || key.startsWith("archive:");
+  function backupOf(doc, at) {
+    return JSON.parse(JSON.stringify({
+      format: BACKUP_FORMAT,
+      version: STORE_VERSION,
+      exportedAt: at,
+      meta: doc.meta,
+      spaces: doc.spaces,
+      archives: doc.archives
+    }));
+  }
+  function readBackup(data, makeId) {
+    if (!isObject(data) || data.format !== BACKUP_FORMAT) throw new Error("This is not a Rolltop backup.");
+    if (!(data.version >= 2)) throw new Error("This backup has no version.");
+    if (data.version > STORE_VERSION) throw new Error("This backup was made by a newer version of Rolltop.");
+    if (!isObject(data.spaces) || !Object.values(data.spaces).some(isObject)) {
+      throw new Error("This backup holds no workspaces.");
+    }
+    const { meta, spaces, archives } = normalize(JSON.parse(JSON.stringify(data)), makeId);
+    return { meta, spaces, archives };
+  }
+  function backupSummary(data) {
+    const spaces = Object.values(isObject(data?.spaces) ? data.spaces : {}).filter(isObject);
+    return {
+      at: data?.exportedAt || 0,
+      workspaces: spaces.length,
+      tabs: spaces.reduce((n, s) => n + list(s.tabs).length, 0)
+    };
+  }
+  function staleSnapshots(keys, keep = SNAPSHOT_DAYS) {
+    return keys.filter((k) => k.startsWith(SNAP_PREFIX) && k !== SNAP_BEFORE_RESTORE).sort().reverse().slice(keep);
+  }
+
   // src/background/core.js
   var DEFAULTS = { auto: true, archiveDays: 14, collapseHours: 8, apiKey: "", model: "claude-haiku-5-5" };
   var ARCHIVE_CAP = 1e3;
@@ -1586,10 +1720,14 @@
   var SEARCH_LIMIT = 50;
   var LOG_CAP = 20;
   var AI_RECENT = 30 * DAY;
-  var TAB_KEY = "tidy";
-  var NAME_KEY = "tidy-name";
-  var ROW_KEY = "tidy-row";
-  var isSortable = (tab) => /^https?:/.test(tab.url || "") && !tab.incognito;
+  var UID_KEY = "uid";
+  var WS_KEY = "ws";
+  var V1_TAB = "tidy";
+  var V1_NAME = "tidy-name";
+  var V1_ROW = "tidy-row";
+  var isWeb2 = (url) => /^https?:/.test(url || "");
+  var isSortable = (tab) => isWeb2(tab.url) && !tab.incognito;
+  var tracked = (tab) => !tab.incognito;
   var hostOf2 = (url) => {
     try {
       return new URL(url).hostname;
@@ -1605,29 +1743,30 @@
       return "";
     }
   };
+  var keepIcon = (url) => (url || "").startsWith("data:") ? "" : url || "";
+  var randomId = (prefix) => prefix + crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  var messageOf = (e) => e && e.message || String(e);
   function createBackground({
     browser: browser2,
     classifyWithAI: classifyWithAI2,
     now = () => Date.now(),
-    delay = { classify: 1200, push: 50, save: 400 }
+    delay = {},
+    // (prefix) -> a new id: 'w' workspace, 'g' group, 't' tab record, 'a' archive record.
+    newId = randomId
   }) {
-    const state = {
-      groups: {},
-      archive: [],
-      log: [],
-      settings: { ...DEFAULTS },
-      counters: { nextGroup: 1, topLevel: 0, nextArchive: 1 }
-    };
-    const assign = /* @__PURE__ */ new Map();
-    const names = /* @__PURE__ */ new Map();
-    const pinRows = /* @__PURE__ */ new Map();
+    const wait = { classify: 1200, push: 50, save: 400, retry: 5e3, ...delay };
+    const doc = { meta: { version: 2, order: [], current: null }, spaces: {}, archives: {}, log: [] };
+    let settings = { ...DEFAULTS };
+    const byTab = /* @__PURE__ */ new Map();
+    const open = /* @__PURE__ */ new Map();
+    const active = /* @__PURE__ */ new Map();
     const queue = /* @__PURE__ */ new Set();
-    const seen = /* @__PURE__ */ new Map();
     const archiving = /* @__PURE__ */ new Set();
     const ports = /* @__PURE__ */ new Set();
-    const status = { sorting: false, error: "" };
+    const status = { sorting: false, error: "", saveError: "" };
     let running = null;
     let importing = 0;
+    let snapDay = "";
     let menu = { port: null, tabId: null, groupId: null };
     const debounce = (fn, ms) => {
       let timer = null;
@@ -1639,70 +1778,372 @@
         }, ms);
       };
     };
-    const save = debounce(() => {
-      browser2.storage.local.set({
-        groups: state.groups,
-        archive: state.archive,
-        counters: state.counters,
-        log: state.log
+    const space = (id) => doc.spaces[id];
+    const spaces = () => doc.meta.order.map(space);
+    const archiveOf = (id) => doc.archives[id] || (doc.archives[id] = []);
+    const groupsOfTab = (tabId) => space(byTab.get(tabId)?.ws)?.groups || {};
+    const homeOfGroup = (groupId) => spaces().find((s) => s.groups[groupId]) || null;
+    const groupIdOfTab = (tabId) => {
+      const e = byTab.get(tabId);
+      return e && e.rec.groupId && space(e.ws).groups[e.rec.groupId] ? e.rec.groupId : null;
+    };
+    const makeGroupId = () => newId("g");
+    function activeOf(windowId) {
+      const id = active.get(windowId);
+      if (space(id)) return id;
+      return space(doc.meta.current) ? doc.meta.current : doc.meta.order[0];
+    }
+    const written = /* @__PURE__ */ new Map();
+    let saving = Promise.resolve();
+    let retry = null;
+    function flush() {
+      saving = saving.then(async () => {
+        const keys = toKeys(doc);
+        const set = {};
+        const texts = /* @__PURE__ */ new Map();
+        for (const [key, value] of Object.entries(keys)) {
+          const text2 = JSON.stringify(value);
+          if (written.get(key) === text2) continue;
+          set[key] = JSON.parse(text2);
+          texts.set(key, text2);
+        }
+        const gone = [...written.keys()].filter((key) => !(key in keys));
+        try {
+          if (texts.size) await browser2.storage.local.set(set);
+          if (gone.length) await browser2.storage.local.remove(gone);
+        } catch (e) {
+          status.saveError = "Rolltop could not save your tabs: " + messageOf(e);
+          push();
+          if (!retry) retry = setTimeout(() => {
+            retry = null;
+            flush();
+          }, wait.retry);
+          return;
+        }
+        texts.forEach((text2, key) => written.set(key, text2));
+        gone.forEach((key) => written.delete(key));
+        if (status.saveError) {
+          status.saveError = "";
+          push();
+        }
       });
-    }, delay.save);
-    function setAssign(tabId, groupId, host, manual = false) {
-      const value = manual ? { groupId, host, manual: true } : { groupId, host };
-      assign.set(tabId, value);
-      browser2.sessions.setTabValue(tabId, TAB_KEY, value).catch(() => {
+      return saving;
+    }
+    const save = debounce(flush, wait.save);
+    async function dailySnapshot(data) {
+      const day = dayOf(now());
+      if (day === snapDay) return;
+      const all = Object.keys(await browser2.storage.local.get(null));
+      if (!all.includes(snapKey(day))) {
+        await browser2.storage.local.set({ [snapKey(day)]: data || backupOf(doc, now()) });
+        all.push(snapKey(day));
+      }
+      snapDay = day;
+      const stale = staleSnapshots(all);
+      if (stale.length) await browser2.storage.local.remove(stale);
+    }
+    function bind(tabId, wsId, rec) {
+      byTab.set(tabId, { ws: wsId, rec });
+      open.set(rec.uid, tabId);
+    }
+    function unbind(tabId) {
+      const e = byTab.get(tabId);
+      if (!e) return null;
+      byTab.delete(tabId);
+      if (open.get(e.rec.uid) === tabId) open.delete(e.rec.uid);
+      return e;
+    }
+    function stamp(tabId, uid) {
+      browser2.sessions.setTabValue(tabId, UID_KEY, uid).catch(() => {
       });
     }
-    function setName(tabId, name) {
-      if (name) {
-        names.set(tabId, name);
-        browser2.sessions.setTabValue(tabId, NAME_KEY, name).catch(() => {
-        });
-      } else {
-        names.delete(tabId);
-        browser2.sessions.removeTabValue(tabId, NAME_KEY).catch(() => {
-        });
+    function makeRec(tab, extra = {}) {
+      return {
+        uid: newId("t"),
+        url: tab.url || "",
+        title: tab.title || "",
+        favIconUrl: keepIcon(tab.favIconUrl),
+        groupId: null,
+        favorite: !!tab.pinned,
+        ...extra
+      };
+    }
+    function sync(rec, tab) {
+      const moved = !!tab.url && tab.url !== rec.url;
+      if (tab.url) rec.url = tab.url;
+      if (tab.title) rec.title = tab.title;
+      if (tab.favIconUrl) rec.favIconUrl = keepIcon(tab.favIconUrl);
+      return moved;
+    }
+    function file(tabId, groupId, host, manual = false) {
+      const e = byTab.get(tabId);
+      if (!e) return;
+      e.rec.groupId = groupId;
+      e.rec.host = host;
+      if (manual) e.rec.manual = true;
+      else delete e.rec.manual;
+    }
+    function unfile(rec) {
+      rec.groupId = null;
+      delete rec.host;
+      delete rec.manual;
+    }
+    function setFavorite(rec, favorite, home) {
+      rec.favorite = favorite;
+      if (!favorite) {
+        delete rec.row;
+        delete rec.slot;
+      } else if (rec.slot == null) {
+        rec.slot = 1 + Math.max(-1, ...home.tabs.map((r) => r.slot ?? -1));
       }
     }
-    function setPinRow(tabId, row) {
-      if (row == null) {
-        pinRows.delete(tabId);
-        browser2.sessions.removeTabValue(tabId, ROW_KEY).catch(() => {
-        });
-      } else {
-        pinRows.set(tabId, row);
-        browser2.sessions.setTabValue(tabId, ROW_KEY, row).catch(() => {
-        });
+    function shelve(wsId, rec) {
+      if (!isWeb2(rec.url)) return;
+      const groupId = rec.groupId || null;
+      doc.archives[wsId] = [
+        {
+          id: newId("a"),
+          uid: rec.uid,
+          url: rec.url,
+          title: rec.title || rec.url,
+          favIconUrl: rec.favIconUrl || "",
+          groupId,
+          at: now(),
+          ...rec.manual ? { manual: true } : {},
+          ...rec.name ? { name: rec.name } : {},
+          ...rec.favorite ? { favorite: true } : {},
+          ...rec.row != null ? { row: rec.row } : {}
+        },
+        ...archiveOf(wsId).filter((a) => !(a.url === rec.url && a.groupId === groupId))
+      ].slice(0, ARCHIVE_CAP);
+    }
+    function takeArchived(uid) {
+      for (const s of spaces()) {
+        const a = archiveOf(s.id).find((x) => x.uid === uid);
+        if (!a) continue;
+        doc.archives[s.id] = archiveOf(s.id).filter((x) => x !== a);
+        return { home: s, a };
       }
+      return null;
+    }
+    function revive(rec, a, home) {
+      rec.uid = a.uid;
+      if (a.groupId && home.groups[a.groupId]) {
+        rec.groupId = a.groupId;
+        rec.host = hostOf2(a.url);
+        if (a.manual) rec.manual = true;
+      }
+      if (a.name) rec.name = a.name;
+      if (a.favorite) setFavorite(rec, true, home);
+      if (a.row != null) rec.row = a.row;
+    }
+    function track(tab) {
+      if (!tracked(tab) || tab.id == null || byTab.has(tab.id)) return;
+      const home = space(activeOf(tab.windowId));
+      const rec = makeRec(tab);
+      home.tabs.push(rec);
+      bind(tab.id, home.id, rec);
+      claim(tab, rec).catch(reportError);
+    }
+    async function claim(tab, rec) {
+      const uid = await browser2.sessions.getTabValue(tab.id, UID_KEY).catch(() => null);
+      const e = byTab.get(tab.id);
+      if (!e || e.rec !== rec) return;
+      if (uid && uid !== rec.uid) {
+        const twin = open.has(uid) ? byTab.get(open.get(uid)) : null;
+        const back = twin ? null : takeArchived(uid);
+        if (twin && twin.ws === e.ws) {
+          const { groupId, host, manual, name } = twin.rec;
+          Object.assign(rec, { groupId, ...host ? { host } : {}, ...manual ? { manual } : {}, ...name ? { name } : {} });
+        } else if (back) {
+          if (back.home.id !== e.ws) {
+            space(e.ws).tabs = space(e.ws).tabs.filter((r) => r !== rec);
+            back.home.tabs.push(rec);
+            e.ws = back.home.id;
+          }
+          open.delete(rec.uid);
+          revive(rec, back.a, back.home);
+          open.set(rec.uid, tab.id);
+          await arrange(tab.windowId);
+        }
+      }
+      stamp(tab.id, rec.uid);
+      gc();
+      changed();
+    }
+    async function reconcile(tabs, legacy) {
+      byTab.clear();
+      open.clear();
+      queue.clear();
+      const known = /* @__PURE__ */ new Map();
+      for (const s of spaces()) s.tabs.forEach((rec) => known.set(rec.uid, { home: s, rec }));
+      const rest = [];
+      for (const t of tabs.filter(tracked)) {
+        const uid = await browser2.sessions.getTabValue(t.id, UID_KEY).catch(() => null);
+        const hit = uid ? known.get(uid) : null;
+        if (hit && !open.has(uid)) {
+          bind(t.id, hit.home.id, hit.rec);
+          sync(hit.rec, t);
+        } else {
+          rest.push([t, uid]);
+        }
+      }
+      for (const [t, uid] of rest) {
+        let home = space(activeOf(t.windowId));
+        const free = (s) => isWeb2(t.url) ? s.tabs.find((r) => !open.has(r.uid) && r.url === t.url) : null;
+        let rec = free(home);
+        for (const s of rec ? [] : spaces()) {
+          rec = free(s);
+          if (rec) {
+            home = s;
+            break;
+          }
+        }
+        if (!rec) {
+          const back = uid ? takeArchived(uid) : null;
+          if (back) home = back.home;
+          rec = makeRec(t, legacy ? await legacyValues(t, home) : {});
+          if (back) revive(rec, back.a, home);
+          home.tabs.push(rec);
+        }
+        bind(t.id, home.id, rec);
+        sync(rec, t);
+        stamp(t.id, rec.uid);
+      }
+      for (const s of spaces()) {
+        const missing = s.tabs.filter((r) => !open.has(r.uid));
+        if (!missing.length) continue;
+        s.tabs = s.tabs.filter((r) => open.has(r.uid));
+        missing.reverse().forEach((r) => shelve(s.id, r));
+      }
+    }
+    async function legacyValues(tab, home) {
+      const value = (key) => browser2.sessions.getTabValue(tab.id, key).catch(() => null);
+      const v = await value(V1_TAB);
+      const name = await value(V1_NAME);
+      const row = await value(V1_ROW);
+      return {
+        ...v && home.groups[v.groupId] ? { groupId: v.groupId, host: v.host || "", ...v.manual ? { manual: true } : {} } : {},
+        ...name ? { name } : {},
+        ...tab.pinned && Number.isInteger(row) ? { row } : {}
+      };
     }
     function gc() {
       if (importing) return;
-      const used = /* @__PURE__ */ new Set();
-      assign.forEach((a) => used.add(a.groupId));
-      state.archive.forEach((a) => a.groupId && used.add(a.groupId));
-      state.groups = gcGroups(state.groups, used);
+      for (const s of spaces()) {
+        const used = /* @__PURE__ */ new Set();
+        s.tabs.forEach((r) => r.groupId && used.add(r.groupId));
+        archiveOf(s.id).forEach((a) => a.groupId && used.add(a.groupId));
+        s.groups = gcGroups(s.groups, used);
+      }
+    }
+    const windowsOf = (tabs) => [...new Set(tabs.map((t) => t.windowId))];
+    async function arrange(windowId, preferTabId) {
+      const wsId = activeOf(windowId);
+      const tabs = (await browser2.tabs.query({})).filter((t) => t.windowId === windowId);
+      const mine = tabs.filter((t) => byTab.get(t.id)?.ws === wsId);
+      const others = tabs.filter((t) => byTab.has(t.id) && byTab.get(t.id).ws !== wsId);
+      const quiet = (p) => Promise.resolve(p).catch(() => {
+      });
+      const hidden = mine.filter((t) => t.hidden).map((t) => t.id);
+      if (hidden.length) await quiet(browser2.tabs.show(hidden));
+      const slot = (t) => byTab.get(t.id).rec.slot ?? Infinity;
+      for (const t of mine.filter((x) => byTab.get(x.id).rec.favorite && !x.pinned).sort((a, b) => slot(a) - slot(b))) {
+        await quiet(browser2.tabs.update(t.id, { pinned: true }));
+      }
+      const current2 = tabs.find((t) => t.active);
+      const prefer = mine.find((t) => t.id === preferTabId);
+      if (prefer && !prefer.active) {
+        await quiet(browser2.tabs.update(prefer.id, { active: true }));
+      } else if (!prefer && current2 && others.includes(current2)) {
+        const last = [...mine].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+        if (last) await quiet(browser2.tabs.update(last.id, { active: true }));
+        else track(await browser2.tabs.create({ windowId, active: true }));
+      }
+      for (const t of others.filter((x) => x.pinned)) await quiet(browser2.tabs.update(t.id, { pinned: false }));
+      const hide = others.filter((t) => !t.hidden).map((t) => t.id);
+      if (hide.length) await quiet(browser2.tabs.hide(hide));
+    }
+    async function arrangeAll() {
+      for (const windowId of windowsOf(await browser2.tabs.query({}))) await arrange(windowId);
+    }
+    function remember(windowId) {
+      browser2.sessions.setWindowValue(windowId, WS_KEY, active.get(windowId)).catch(() => {
+      });
+    }
+    async function switchWorkspace(windowId, wsId, tabId) {
+      if (!space(wsId)) return;
+      active.set(windowId, wsId);
+      doc.meta.current = wsId;
+      remember(windowId);
+      await arrange(windowId, tabId);
+    }
+    async function learnWindow(windowId) {
+      if (windowId == null || active.has(windowId)) return;
+      active.set(windowId, activeOf(windowId));
+      const saved = await browser2.sessions.getWindowValue(windowId, WS_KEY).catch(() => null);
+      if (saved && space(saved) && saved !== active.get(windowId)) {
+        active.set(windowId, saved);
+        await arrange(windowId);
+        push();
+      } else if (!saved) {
+        remember(windowId);
+      }
+    }
+    function transfer(from, to, only) {
+      const goes = (groupId) => only ? only.has(groupId) : true;
+      const moving = Object.values(from.groups).filter((g) => goes(g.id)).map((g) => ({ ...g, parentId: g.parentId && goes(g.parentId) ? g.parentId : null }));
+      const merged = mergeGroups(to.groups, to.counters, moving, makeGroupId);
+      to.groups = merged.groups;
+      to.counters = merged.counters;
+      const mapped = (groupId) => groupId ? merged.ids.get(groupId) || null : null;
+      const stay = [];
+      for (const rec of from.tabs) {
+        if (!goes(rec.groupId)) {
+          stay.push(rec);
+          continue;
+        }
+        rec.groupId = mapped(rec.groupId);
+        to.tabs.push(rec);
+        const e = byTab.get(open.get(rec.uid));
+        if (e) e.ws = to.id;
+      }
+      from.tabs = stay;
+      const kept = [];
+      const sent = [];
+      for (const a of archiveOf(from.id)) {
+        if (goes(a.groupId)) sent.push({ ...a, groupId: mapped(a.groupId) });
+        else kept.push(a);
+      }
+      doc.archives[from.id] = kept;
+      doc.archives[to.id] = [...archiveOf(to.id), ...sent].sort((a, b) => b.at - a.at).slice(0, ARCHIVE_CAP);
+      for (const g of moving) delete from.groups[g.id];
     }
     async function snapshot() {
       const tabs = await browser2.tabs.query({});
-      const archiveCounts = {};
-      for (const a of state.archive) {
-        if (a.groupId) archiveCounts[a.groupId] = (archiveCounts[a.groupId] || 0) + 1;
-      }
+      const activeMap = {};
+      windowsOf(tabs).forEach((windowId) => {
+        activeMap[windowId] = activeOf(windowId);
+      });
       return {
         type: "state",
         tabs: tabs.map((t) => {
-          const a = assign.get(t.id);
-          const groupId = a && state.groups[a.groupId] ? a.groupId : null;
+          const e = byTab.get(t.id);
+          const rec = e ? e.rec : null;
+          const groupId = groupIdOfTab(t.id);
+          const pinned = rec ? !!rec.favorite : !!t.pinned;
           return {
             id: t.id,
             windowId: t.windowId,
+            // A private tab has no record; it shows in whichever workspace is open.
+            ws: e ? e.ws : null,
             index: t.index,
             title: t.title || "",
-            name: names.get(t.id) || "",
+            name: rec && rec.name || "",
             url: t.url || "",
             favIconUrl: t.favIconUrl || "",
-            pinned: !!t.pinned,
-            pinRow: t.pinned ? pinRows.get(t.id) ?? null : null,
+            pinned,
+            pinRow: pinned && rec ? rec.row ?? null : null,
             active: !!t.active,
             attention: !!t.attention,
             lastAccessed: t.lastAccessed || now(),
@@ -1710,12 +2151,19 @@
             pending: !groupId && isSortable(t)
           };
         }),
-        groups: state.groups,
-        archiveCounts,
-        auto: state.settings.auto,
-        ai: !!state.settings.apiKey,
+        // Sidebars get per-group counts; archived tabs themselves are fetched by search.
+        spaces: spaces().map((s) => {
+          const archiveCounts = {};
+          for (const a of archiveOf(s.id)) {
+            if (a.groupId) archiveCounts[a.groupId] = (archiveCounts[a.groupId] || 0) + 1;
+          }
+          return { id: s.id, name: s.name, groups: s.groups, archiveCounts };
+        }),
+        active: activeMap,
+        auto: settings.auto,
+        ai: !!settings.apiKey,
         sorting: status.sorting,
-        error: status.error
+        error: status.saveError || status.error
       };
     }
     const push = debounce(async () => {
@@ -1728,88 +2176,99 @@
           ports.delete(p);
         }
       });
-    }, delay.push);
+    }, wait.push);
     const changed = () => {
       save();
       push();
     };
     const scheduleClassify = debounce(() => {
       runClassify();
-    }, delay.classify);
+    }, wait.classify);
     function isFiled(tab) {
-      const a = assign.get(tab.id);
-      if (!a || !state.groups[a.groupId]) return false;
-      return !!a.manual || a.host === hostOf2(tab.url) || isHardPinned(state.groups, a.groupId);
+      const e = byTab.get(tab.id);
+      const groupId = groupIdOfTab(tab.id);
+      if (!groupId) return false;
+      return !!e.rec.manual || e.rec.host === hostOf2(tab.url) || isHardPinned(space(e.ws).groups, groupId);
     }
     function consider(tab) {
       if (importing) return;
-      if (!isSortable(tab) || tab.status === "loading" || isFiled(tab)) return;
+      if (!byTab.has(tab.id) || !isSortable(tab) || tab.status === "loading" || isFiled(tab)) return;
       queue.add(tab.id);
       scheduleClassify();
     }
-    function contextFor(allTabs) {
+    function contextFor(home) {
+      const groups = home.groups;
       const titles = /* @__PURE__ */ new Map();
       const relevant = /* @__PURE__ */ new Set();
       const add = (gid, title) => {
-        if (!state.groups[gid]) return;
-        chain(state.groups, gid).forEach((id) => relevant.add(id));
+        if (!groups[gid]) return;
+        chain(groups, gid).forEach((id) => relevant.add(id));
         if (!title) return;
         if (!titles.has(gid)) titles.set(gid, []);
         if (titles.get(gid).length < 6) titles.get(gid).push(title);
       };
-      allTabs.forEach((t) => {
-        const a = assign.get(t.id);
-        if (a) add(a.groupId, t.title);
-      });
+      home.tabs.forEach((rec) => add(rec.groupId, rec.title));
       const cutoff = now() - AI_RECENT;
-      state.archive.forEach((a) => {
+      archiveOf(home.id).forEach((a) => {
         if (a.at >= cutoff) add(a.groupId, a.title);
       });
       const hidden = (g) => !!g.site && !g.manual;
-      return Object.values(state.groups).filter((g) => relevant.has(g.id) && !hidden(g) && !isHardPinned(state.groups, g.id)).map((g) => ({
+      return Object.values(groups).filter((g) => relevant.has(g.id) && !hidden(g) && !isHardPinned(groups, g.id)).map((g) => ({
         id: g.id,
         name: g.name,
         label: g.label,
-        parentId: g.parentId && !hidden(state.groups[g.parentId]) ? g.parentId : null,
+        parentId: g.parentId && !hidden(groups[g.parentId]) ? g.parentId : null,
         titles: titles.get(g.id) || []
       }));
     }
-    function apply(plan, batch, liveIds) {
-      const res = applyPlan(state.groups, state.counters, plan, liveIds);
-      state.groups = res.groups;
-      state.counters = res.counters;
+    function apply(home, plan, batch, liveIds) {
+      const res = applyPlan(home.groups, home.counters, plan, liveIds, makeGroupId);
+      home.groups = res.groups;
+      home.counters = res.counters;
       const done = /* @__PURE__ */ new Set();
       for (const t of batch) {
         const gid = res.assign[t.id];
-        if (!gid || assign.get(t.id)?.manual) continue;
-        setAssign(t.id, gid, hostOf2(t.url));
+        const e = byTab.get(t.id);
+        if (!gid || !e || e.ws !== home.id || e.rec.manual) continue;
+        file(t.id, gid, hostOf2(t.url));
         done.add(t.id);
       }
       return done;
     }
     async function classifyLoop() {
       while (queue.size) {
-        const ids = [...queue].slice(0, BATCH);
+        for (const id of [...queue]) {
+          if (!byTab.has(id)) queue.delete(id);
+        }
+        if (!queue.size) break;
+        const wsId = byTab.get([...queue][0]).ws;
+        const ids = [...queue].filter((id) => byTab.get(id).ws === wsId).slice(0, BATCH);
         ids.forEach((id) => queue.delete(id));
         const all = await browser2.tabs.query({});
-        const batch = all.filter((t) => ids.includes(t.id) && isSortable(t) && !isFiled(t));
-        if (!batch.length) continue;
+        const inWs = (t) => byTab.get(t.id)?.ws === wsId;
+        const batch = all.filter((t) => ids.includes(t.id) && inWs(t) && isSortable(t) && !isFiled(t));
+        if (!batch.length || !space(wsId)) continue;
         status.sorting = true;
         push();
-        const useAI = !!(state.settings.apiKey && classifyWithAI2);
-        const model = state.settings.model || DEFAULTS.model;
-        const context2 = useAI ? contextFor(all) : [];
-        const nameOf = (gid) => state.groups[gid] ? pathName(state.groups, gid) : "";
-        const before = new Map(Object.values(state.groups).map((g) => [g.id, g.name]));
+        const useAI = !!(settings.apiKey && classifyWithAI2);
+        const model = settings.model || DEFAULTS.model;
+        const context2 = useAI ? contextFor(space(wsId)) : [];
+        const nameOf = (gid) => {
+          const groups = space(wsId)?.groups || {};
+          return groups[gid] ? pathName(groups, gid) : "";
+        };
+        const fromOf = (t) => inWs({ id: t.openerTabId }) ? groupIdOfTab(t.openerTabId) : null;
+        const before = new Map(Object.values(space(wsId).groups).map((g) => [g.id, g.name]));
         const entry = {
           at: now(),
+          workspace: space(wsId).name,
           model: useAI ? model : "",
           error: "",
           groups: context2.map((g) => ({ name: nameOf(g.id), label: g.label, titles: g.titles })),
           tabs: batch.map((t) => ({
             title: t.title || "",
             url: logUrl(t.url),
-            openedFrom: nameOf(assign.get(t.openerTabId)?.groupId)
+            openedFrom: nameOf(fromOf(t))
           })),
           renames: []
         };
@@ -1817,34 +2276,36 @@
         if (useAI) {
           try {
             plan = await classifyWithAI2({
-              apiKey: state.settings.apiKey,
+              apiKey: settings.apiKey,
               model,
               groups: context2,
               tabs: batch.map((t) => {
-                const from = assign.get(t.openerTabId)?.groupId;
+                const from = fromOf(t);
                 return {
                   id: t.id,
                   title: t.title || "",
                   url: t.url,
-                  openerGroupId: from && !isHardPinned(state.groups, from) ? from : null
+                  openerGroupId: from && !isHardPinned(space(wsId).groups, from) ? from : null
                 };
               })
             });
             status.error = "";
           } catch (e) {
-            status.error = e && e.message || String(e);
+            status.error = messageOf(e);
             entry.error = status.error;
           }
         }
+        const home = space(wsId);
+        if (!home) continue;
         const live = new Set((await browser2.tabs.query({})).map((t) => t.id));
-        const liveIds = new Set(batch.map((t) => t.id).filter((id) => live.has(id)));
-        const done = plan ? apply(plan, batch, liveIds) : /* @__PURE__ */ new Set();
+        const liveIds = new Set(batch.map((t) => t.id).filter((id) => live.has(id) && inWs({ id })));
+        const done = plan ? apply(home, plan, batch, liveIds) : /* @__PURE__ */ new Set();
         const rest = batch.filter((t) => liveIds.has(t.id) && !done.has(t.id));
-        const bySite = rest.length ? apply(heuristicPlan(rest, state.groups), rest, liveIds) : /* @__PURE__ */ new Set();
+        const bySite = rest.length ? apply(home, heuristicPlan(rest, home.groups), rest, liveIds) : /* @__PURE__ */ new Set();
         const reasons = new Map((plan && plan.assignments || []).map((a) => [a.tabId, a.reason || ""]));
         batch.forEach((t, i) => {
           const by = done.has(t.id) ? "ai" : bySite.has(t.id) ? "site" : "";
-          const gid = by ? assign.get(t.id)?.groupId : null;
+          const gid = by ? groupIdOfTab(t.id) : null;
           Object.assign(entry.tabs[i], {
             by,
             group: nameOf(gid),
@@ -1853,16 +2314,16 @@
           });
         });
         before.forEach((name, id) => {
-          const g = state.groups[id];
+          const g = home.groups[id];
           if (g && g.name !== name) entry.renames.push({ from: name, to: g.name });
         });
-        state.log = [entry, ...state.log].slice(0, LOG_CAP);
+        doc.log = [entry, ...doc.log].slice(0, LOG_CAP);
       }
     }
     function runClassify() {
       if (!running) {
         running = classifyLoop().catch((e) => {
-          status.error = e && e.message || String(e);
+          status.error = messageOf(e);
         }).finally(() => {
           running = null;
           status.sorting = false;
@@ -1875,62 +2336,52 @@
     async function resortAll() {
       const tabs = await browser2.tabs.query({});
       tabs.filter(isSortable).forEach((t) => {
-        if (assign.get(t.id)?.manual) return;
-        assign.delete(t.id);
+        const e = byTab.get(t.id);
+        if (!e || e.rec.manual) return;
+        unfile(e.rec);
         queue.add(t.id);
       });
       await runClassify();
       if (queue.size) await runClassify();
     }
-    function expand(groupId) {
-      chain(state.groups, groupId).forEach((id) => {
-        state.groups[id].collapsed = false;
+    function expand(home, groupId) {
+      chain(home.groups, groupId).forEach((id) => {
+        home.groups[id].collapsed = false;
       });
-    }
-    function record(t) {
-      const filed = assign.get(t.id);
-      const groupId = filed?.groupId || null;
-      state.archive = state.archive.filter((a) => !(a.url === t.url && a.groupId === groupId));
-      state.archive.unshift({
-        id: "a" + state.counters.nextArchive++,
-        url: t.url,
-        title: t.title || t.url,
-        favIconUrl: (t.favIconUrl || "").startsWith("data:") ? "" : t.favIconUrl || "",
-        groupId,
-        at: now(),
-        ...filed?.manual ? { manual: true } : {},
-        ...names.has(t.id) ? { name: names.get(t.id) } : {}
-      });
-      state.archive = state.archive.slice(0, ARCHIVE_CAP);
     }
     async function archiveTabs(tabs) {
       if (!tabs.length) return;
       const all = await browser2.tabs.query({});
       const closing = new Set(tabs.map((t) => t.id));
-      const windows = new Set(tabs.map((t) => t.windowId));
-      for (const windowId of windows) {
-        if (!all.some((t) => t.windowId === windowId && !closing.has(t.id))) {
-          await browser2.tabs.create({ windowId });
+      for (const windowId of windowsOf(tabs)) {
+        const wsId = activeOf(windowId);
+        const shown = (t) => t.windowId === windowId && (!byTab.has(t.id) || byTab.get(t.id).ws === wsId);
+        if (!all.some((t) => shown(t) && !closing.has(t.id))) {
+          track(await browser2.tabs.create({ windowId }));
         }
       }
       for (const t of tabs) {
         archiving.add(t.id);
-        if (isSortable(t)) record(t);
+        const e = byTab.get(t.id);
+        if (e) shelve(e.ws, e.rec);
       }
-      save();
       await browser2.tabs.remove(tabs.map((t) => t.id));
     }
-    async function reopen(records2, windowId) {
+    async function reopen(home, records2, windowId) {
       const ids = new Set(records2.map((r) => r.id));
-      state.archive = state.archive.filter((a) => !ids.has(a.id));
+      doc.archives[home.id] = archiveOf(home.id).filter((a) => !ids.has(a.id));
+      if (windowId != null && activeOf(windowId) !== home.id) await switchWorkspace(windowId, home.id);
       let first = true;
       for (const r of records2) {
         const tab = await browser2.tabs.create({ url: r.url, windowId, active: first });
         first = false;
-        if (r.name) setName(tab.id, r.name);
-        if (r.groupId && state.groups[r.groupId]) {
-          setAssign(tab.id, r.groupId, hostOf2(r.url), !!r.manual);
-          expand(r.groupId);
+        track(tab);
+        const e = byTab.get(tab.id);
+        if (!e) continue;
+        if (r.name) e.rec.name = r.name;
+        if (r.groupId && space(e.ws).groups[r.groupId]) {
+          file(tab.id, r.groupId, hostOf2(r.url), !!r.manual);
+          expand(space(e.ws), r.groupId);
         }
       }
     }
@@ -1938,61 +2389,65 @@
       const q = (query || "").trim().toLowerCase();
       if (!q) return [];
       const out = [];
-      const openUrls = new Set([...seen.values()].map((t) => t.url));
-      for (const a of state.archive) {
-        if (openUrls.has(a.url)) continue;
-        if (!matchesQuery(`${a.name || ""} ${a.title}`, a.url, q)) continue;
-        out.push(a);
-        if (out.length >= SEARCH_LIMIT) break;
+      const openUrls = new Set([...byTab.values()].map((e) => e.rec.url));
+      for (const s of spaces()) {
+        for (const a of archiveOf(s.id)) {
+          if (openUrls.has(a.url)) continue;
+          if (!matchesQuery(`${a.name || ""} ${a.title}`, a.url, q)) continue;
+          out.push({ ...a, ws: s.id });
+          if (out.length >= SEARCH_LIMIT) return out;
+        }
       }
       return out;
     }
     function collapseIdle(tabs) {
-      const cutoff = now() - state.settings.collapseHours * DAY / 24;
+      const cutoff = now() - settings.collapseHours * DAY / 24;
       const fresh = /* @__PURE__ */ new Map();
       for (const t of tabs) {
-        const a = assign.get(t.id);
-        if (!a || !state.groups[a.groupId]) continue;
-        const seen2 = t.active || t.audible ? now() : t.lastAccessed || now();
-        for (const id of chain(state.groups, a.groupId)) fresh.set(id, Math.max(fresh.get(id) || 0, seen2));
+        const groupId = groupIdOfTab(t.id);
+        if (!groupId) continue;
+        const groups = groupsOfTab(t.id);
+        const seen = t.active || t.audible ? now() : t.lastAccessed || now();
+        for (const id of chain(groups, groupId)) fresh.set(groups[id], Math.max(fresh.get(groups[id]) || 0, seen));
       }
-      for (const [id, seen2] of fresh) {
-        const g = state.groups[id];
-        if (g.collapsed || seen2 > cutoff || (g.idleCollapsedAt || 0) >= seen2) continue;
+      for (const [g, seen] of fresh) {
+        if (g.collapsed || seen > cutoff || (g.idleCollapsedAt || 0) >= seen) continue;
         g.collapsed = true;
         g.idleCollapsedAt = now();
       }
     }
     async function tidy() {
-      if (!state.settings.auto) return;
-      const cutoff = now() - state.settings.archiveDays * DAY;
+      if (!settings.auto) return;
+      const cutoff = now() - settings.archiveDays * DAY;
       const tabs = await browser2.tabs.query({});
       collapseIdle(tabs);
       const stale = tabs.filter((t) => {
-        if (t.pinned || t.active || t.audible || !isSortable(t)) return false;
+        const e = byTab.get(t.id);
+        if (!e || e.rec.favorite || t.pinned || t.active || t.audible || !isSortable(t)) return false;
         if ((t.lastAccessed || now()) > cutoff) return false;
-        const a = assign.get(t.id);
-        return !(a && isHardPinned(state.groups, a.groupId));
+        const groupId = groupIdOfTab(t.id);
+        return !(groupId && isHardPinned(space(e.ws).groups, groupId));
       });
       await archiveTabs(stale);
       gc();
       changed();
     }
-    async function exportWorkspace() {
-      const tabs = (await browser2.tabs.query({})).filter(isSortable).sort((a, b) => a.windowId - b.windowId || a.index - b.index);
+    async function exportWorkspace(windowId) {
+      const home = space(activeOf(windowId));
+      const tabs = (await browser2.tabs.query({})).filter((t) => isSortable(t) && byTab.get(t.id)?.ws === home.id).sort((a, b) => a.windowId - b.windowId || a.index - b.index);
       const used = /* @__PURE__ */ new Set();
       const out = tabs.map((t) => {
-        const a = assign.get(t.id);
-        const filed = a && state.groups[a.groupId] ? a : null;
-        if (filed) chain(state.groups, filed.groupId).forEach((id) => used.add(id));
+        const { rec } = byTab.get(t.id);
+        const groupId = groupIdOfTab(t.id);
+        if (groupId) chain(home.groups, groupId).forEach((id) => used.add(id));
         return {
           url: t.url,
           title: t.title || "",
-          groupId: filed ? filed.groupId : null,
-          pinned: !!t.pinned,
-          ...t.pinned && pinRows.has(t.id) ? { pinRow: pinRows.get(t.id) } : {},
-          ...names.has(t.id) ? { name: names.get(t.id) } : {},
-          ...filed?.manual ? { manual: true } : {}
+          groupId,
+          pinned: !!rec.favorite,
+          ...rec.favorite && rec.row != null ? { pinRow: rec.row } : {},
+          ...rec.name ? { name: rec.name } : {},
+          ...groupId && rec.manual ? { manual: true } : {}
         };
       });
       return {
@@ -2000,7 +2455,7 @@
         version: VERSION,
         exportedAt: now(),
         // Groups kept alive only by archived tabs are left out.
-        groups: Object.values(state.groups).filter((g) => used.has(g.id)).map(({ idleCollapsedAt, ...g }) => g),
+        groups: Object.values(home.groups).filter((g) => used.has(g.id)).map(({ idleCollapsedAt, ...g }) => g),
         tabs: out
       };
     }
@@ -2008,19 +2463,19 @@
       const ws = readWorkspace(data);
       const result = { groups: 0, tabs: 0, skipped: 0, failed: 0 };
       const key = (url, groupId) => url + "\n" + (groupId || "");
+      const home = space(activeOf(windowId));
       importing += 1;
       try {
-        const merged = mergeGroups(state.groups, state.counters, ws.groups);
-        state.groups = merged.groups;
-        state.counters = merged.counters;
+        const merged = mergeGroups(home.groups, home.counters, ws.groups, makeGroupId);
+        home.groups = merged.groups;
+        home.counters = merged.counters;
         result.groups = merged.added;
         const groupFor = (id) => merged.ids.get(id) || null;
-        const here = await browser2.tabs.query({});
-        const open = new Set(here.map((t) => key(t.url, assign.get(t.id)?.groupId)));
-        const rowBase = 1 + Math.max(-1, ...here.filter((t) => t.pinned && (windowId == null || t.windowId === windowId)).map((t) => pinRows.get(t.id) ?? -1));
+        const have = new Set(home.tabs.map((r) => key(r.url, r.groupId)));
+        const rowBase = 1 + Math.max(-1, ...home.tabs.filter((r) => r.favorite).map((r) => r.row ?? -1));
         for (const t of ws.tabs) {
           const groupId = groupFor(t.groupId);
-          if (open.has(key(t.url, groupId))) {
+          if (have.has(key(t.url, groupId))) {
             result.skipped += 1;
             continue;
           }
@@ -2031,10 +2486,16 @@
             result.failed += 1;
             continue;
           }
-          open.add(key(t.url, groupId));
-          if (groupId) setAssign(tab.id, groupId, hostOf2(t.url), !!t.manual);
-          if (t.name) setName(tab.id, t.name);
-          if (t.pinRow != null) setPinRow(tab.id, rowBase + t.pinRow);
+          have.add(key(t.url, groupId));
+          track(tab);
+          const e = byTab.get(tab.id);
+          if (e) {
+            Object.assign(e.rec, { url: t.url, title: t.title || e.rec.title });
+            if (groupId) file(tab.id, groupId, hostOf2(t.url), !!t.manual);
+            if (t.name) e.rec.name = t.name;
+            if (t.pinned) setFavorite(e.rec, true, home);
+            if (t.pinRow != null) e.rec.row = rowBase + t.pinRow;
+          }
           result.tabs += 1;
         }
       } finally {
@@ -2045,6 +2506,30 @@
       (await browser2.tabs.query({})).forEach(consider);
       return result;
     }
+    const exportBackup = () => backupOf(doc, now());
+    async function restoreBackup(data) {
+      const next = readBackup(data, newId);
+      await flush();
+      await browser2.storage.local.set({ [SNAP_BEFORE_RESTORE]: backupOf(doc, now()) });
+      Object.assign(doc, next);
+      const tabs = await browser2.tabs.query({});
+      await reconcile(tabs, false);
+      await arrangeAll();
+      gc();
+      push();
+      await flush();
+      tabs.forEach(consider);
+      return backupSummary(data);
+    }
+    async function listSnapshots() {
+      const all = await browser2.storage.local.get(null);
+      return Object.keys(all).filter((key) => key.startsWith(SNAP_PREFIX)).sort().reverse().map((key) => ({ key, ...backupSummary(all[key]) }));
+    }
+    async function restoreSnapshot(key) {
+      const found = await browser2.storage.local.get(key);
+      if (!String(key).startsWith(SNAP_PREFIX) || !found[key]) throw new Error("That snapshot is no longer kept.");
+      return restoreBackup(found[key]);
+    }
     async function placeBeside(tab, nearTabId, after) {
       const near = await browser2.tabs.get(nearTabId);
       if (near.windowId !== tab.windowId || near.id === tab.id) return;
@@ -2053,19 +2538,30 @@
       if (index !== tab.index) await browser2.tabs.move(tab.id, { index });
     }
     async function handle(msg) {
-      const g = msg.groupId ? state.groups[msg.groupId] : null;
+      const home = msg.groupId ? homeOfGroup(msg.groupId) : null;
+      const g = home ? home.groups[msg.groupId] : null;
+      const e = msg.tabId != null ? byTab.get(msg.tabId) : null;
       switch (msg.type) {
-        case "activate":
-          await browser2.tabs.update(msg.tabId, { active: true });
+        case "activate": {
+          const tab = await browser2.tabs.get(msg.tabId);
+          if (e && activeOf(tab.windowId) !== e.ws) await switchWorkspace(tab.windowId, e.ws, tab.id);
+          else await browser2.tabs.update(msg.tabId, { active: true });
+          if (msg.windowId != null && tab.windowId !== msg.windowId) {
+            await browser2.windows.update(tab.windowId, { focused: true });
+          }
           break;
+        }
         case "closeTab": {
           const tab = await browser2.tabs.get(msg.tabId);
           await archiveTabs([tab]);
           break;
         }
         case "pinTab":
+          if (e) {
+            setFavorite(e.rec, !!msg.pinned, space(e.ws));
+            delete e.rec.row;
+          }
           await browser2.tabs.update(msg.tabId, { pinned: !!msg.pinned });
-          setPinRow(msg.tabId, null);
           break;
         // The pin grid as arranged by a drop: rows of tab ids. Tabs not pinned
         // yet are pinned, and the tab strip takes the same order.
@@ -2076,26 +2572,29 @@
             for (const tabId of row) {
               const tab = await browser2.tabs.get(tabId).catch(() => null);
               if (!tab || tab.id == null || tab.windowId !== msg.windowId) continue;
+              const rec = byTab.get(tabId)?.rec;
+              if (rec) Object.assign(rec, { favorite: true, row: r, slot: index });
               if (!tab.pinned) await browser2.tabs.update(tabId, { pinned: true });
               await browser2.tabs.move(tabId, { index });
-              setPinRow(tabId, r);
               index += 1;
             }
           }
           break;
         }
         case "newTab":
-          await browser2.tabs.create({ windowId: msg.windowId, pinned: !!msg.pinned });
+          track(await browser2.tabs.create({ windowId: msg.windowId, pinned: !!msg.pinned }));
           break;
         case "toggleGroup":
           if (g) g.collapsed = !g.collapsed;
           break;
         case "showGroup":
-          if (g) expand(g.id);
+          if (!g) break;
+          expand(home, g.id);
+          if (msg.windowId != null && activeOf(msg.windowId) !== home.id) await switchWorkspace(msg.windowId, home.id);
           break;
         // Moves a top-level group across the line, with everything nested in it.
         case "pinGroup":
-          if (g && chain(state.groups, g.id).length === 1) g.pinned = !g.pinned;
+          if (g && chain(home.groups, g.id).length === 1) g.pinned = !g.pinned;
           break;
         case "renameGroup": {
           const name = clean(msg.name, 40);
@@ -2105,26 +2604,30 @@
           break;
         }
         // An empty name goes back to the page's own title.
-        case "renameTab":
-          setName(msg.tabId, clean(msg.name, 80));
+        case "renameTab": {
+          if (!e) break;
+          const name = clean(msg.name, 80);
+          if (name) e.rec.name = name;
+          else delete e.rec.name;
           break;
+        }
         case "moveTab": {
-          if (!g) break;
+          if (!g || !e || e.ws !== home.id) break;
           const tab = await browser2.tabs.get(msg.tabId);
-          setAssign(tab.id, g.id, hostOf2(tab.url), true);
+          file(tab.id, g.id, hostOf2(tab.url), true);
           queue.delete(tab.id);
-          expand(g.id);
+          expand(home, g.id);
           if (msg.nearTabId != null) await placeBeside(tab, msg.nearTabId, msg.after);
           break;
         }
         // Drag and drop of a group: beside another group, or into it.
         case "moveGroup": {
-          const target = state.groups[msg.targetId];
+          const target = home ? home.groups[msg.targetId] : null;
           if (!g || !target || g === target) break;
           const into = msg.where === "into";
           const parentId = into ? target.id : target.parentId || null;
-          if (!canNest(state.groups, g.id, parentId)) break;
-          const sibs = (childMap(state.groups).get(parentId) || []).filter((s) => s !== g);
+          if (!canNest(home.groups, g.id, parentId)) break;
+          const sibs = (childMap(home.groups).get(parentId) || []).filter((s) => s !== g);
           let prev = sibs[sibs.length - 1];
           let next;
           if (!into) {
@@ -2135,53 +2638,121 @@
           g.order = prev && next ? (prev.order + next.order) / 2 : prev ? prev.order + 1 : next ? next.order - 1 : 1;
           g.parentId = parentId;
           g.pinned = parentId == null && !!target.pinned;
-          if (into) expand(target.id);
+          if (into) expand(home, target.id);
           break;
         }
         case "newGroupForTab": {
+          if (!e) break;
+          const own = space(e.ws);
           const tab = await browser2.tabs.get(msg.tabId);
-          const res = applyPlan(state.groups, state.counters, {
+          const res = applyPlan(own.groups, own.counters, {
             newGroups: [{ ref: "new", name: "New group", label: "Custom", parent: null }],
             assignments: [{ tabId: tab.id, group: "new" }]
-          }, /* @__PURE__ */ new Set([tab.id]));
-          state.groups = res.groups;
-          state.counters = res.counters;
-          state.groups[res.assign[tab.id]].manual = true;
-          setAssign(tab.id, res.assign[tab.id], hostOf2(tab.url), true);
+          }, /* @__PURE__ */ new Set([tab.id]), makeGroupId);
+          own.groups = res.groups;
+          own.counters = res.counters;
+          own.groups[res.assign[tab.id]].manual = true;
+          file(tab.id, res.assign[tab.id], hostOf2(tab.url), true);
           queue.delete(tab.id);
           break;
         }
         case "archiveGroup": {
           if (!g) break;
-          const ids = subtree(state.groups, g.id);
+          const ids = subtree(home.groups, g.id);
           ids.forEach((id) => {
-            state.groups[id].pinned = false;
+            home.groups[id].pinned = false;
           });
           const tabs = await browser2.tabs.query({});
-          await archiveTabs(tabs.filter((t) => !t.pinned && ids.includes(assign.get(t.id)?.groupId)));
+          await archiveTabs(tabs.filter((t) => {
+            const own = byTab.get(t.id);
+            return own && own.ws === home.id && !own.rec.favorite && ids.includes(own.rec.groupId);
+          }));
           break;
         }
         case "reopenGroup": {
           if (!g) break;
-          const ids = subtree(state.groups, g.id);
-          await reopen(state.archive.filter((a) => ids.includes(a.groupId)).reverse(), msg.windowId);
+          const ids = subtree(home.groups, g.id);
+          await reopen(home, archiveOf(home.id).filter((a) => ids.includes(a.groupId)).reverse(), msg.windowId);
           break;
         }
         case "reopenTab": {
-          const rec = state.archive.find((a) => a.id === msg.archiveId);
-          if (rec) await reopen([rec], msg.windowId);
+          const from = spaces().find((s) => archiveOf(s.id).some((a) => a.id === msg.archiveId));
+          if (from) await reopen(from, [archiveOf(from.id).find((a) => a.id === msg.archiveId)], msg.windowId);
+          break;
+        }
+        case "switchWorkspace":
+          await switchWorkspace(msg.windowId, msg.wsId);
+          break;
+        case "newWorkspace": {
+          const id = newId("w");
+          const taken = new Set(spaces().map((s) => s.name));
+          let n = doc.meta.order.length + 1;
+          while (taken.has("Workspace " + n)) n += 1;
+          doc.spaces[id] = newSpace(id, clean(msg.name, 30) || "Workspace " + n);
+          doc.archives[id] = [];
+          doc.meta.order.push(id);
+          await switchWorkspace(msg.windowId, id);
+          break;
+        }
+        case "renameWorkspace": {
+          const name = clean(msg.name, 30);
+          if (space(msg.wsId) && name) space(msg.wsId).name = name;
+          break;
+        }
+        // Nothing in a deleted workspace is lost: its groups, tabs and archive
+        // join the workspace next to it.
+        case "deleteWorkspace": {
+          const from = space(msg.wsId);
+          const at = doc.meta.order.indexOf(msg.wsId);
+          if (!from || doc.meta.order.length < 2) break;
+          const to = space(doc.meta.order[at + 1] ?? doc.meta.order[at - 1]);
+          transfer(from, to);
+          doc.meta.order.splice(at, 1);
+          delete doc.spaces[from.id];
+          delete doc.archives[from.id];
+          if (doc.meta.current === from.id) doc.meta.current = to.id;
+          active.forEach((wsId, windowId) => {
+            if (wsId !== from.id) return;
+            active.set(windowId, to.id);
+            remember(windowId);
+          });
+          await arrangeAll();
+          break;
+        }
+        // The tab leaves its group behind: groups belong to one workspace.
+        case "moveTabToWorkspace": {
+          const to = space(msg.wsId);
+          if (!e || !to || e.ws === to.id) break;
+          const tab = await browser2.tabs.get(msg.tabId);
+          space(e.ws).tabs = space(e.ws).tabs.filter((r) => r !== e.rec);
+          unfile(e.rec);
+          delete e.rec.row;
+          delete e.rec.slot;
+          if (e.rec.favorite) setFavorite(e.rec, true, to);
+          to.tabs.push(e.rec);
+          e.ws = to.id;
+          queue.delete(tab.id);
+          await arrange(tab.windowId);
+          consider(tab);
+          break;
+        }
+        case "moveGroupToWorkspace": {
+          const to = space(msg.wsId);
+          if (!g || !to || to === home) break;
+          transfer(home, to, new Set(subtree(home.groups, g.id)));
+          await arrangeAll();
           break;
         }
         case "setAuto":
-          state.settings.auto = !!msg.auto;
-          await browser2.storage.local.set({ settings: state.settings });
-          if (state.settings.auto) await tidy();
+          settings.auto = !!msg.auto;
+          await browser2.storage.local.set({ settings });
+          if (settings.auto) await tidy();
           break;
         case "resort":
           await resortAll();
           break;
         case "clearLog":
-          state.log = [];
+          doc.log = [];
           break;
         default:
           return;
@@ -2190,14 +2761,17 @@
       changed();
     }
     function moveTargets(tabId) {
-      const current = assign.get(tabId)?.groupId;
+      const e = byTab.get(tabId);
+      if (!e) return [];
+      const { groups, tabs } = space(e.ws);
+      const current2 = groupIdOfTab(tabId);
       const live = /* @__PURE__ */ new Set();
-      assign.forEach((a) => chain(state.groups, a.groupId).forEach((id) => live.add(id)));
-      const kids = childMap(state.groups);
+      tabs.forEach((r) => chain(groups, r.groupId).forEach((id) => live.add(id)));
+      const kids = childMap(groups);
       const out = [];
       const walk = (g) => {
         if (!live.has(g.id)) return;
-        if (g.id !== current) out.push({ id: g.id, title: pathName(state.groups, g.id) });
+        if (g.id !== current2) out.push({ id: g.id, title: pathName(groups, g.id) });
         (kids.get(g.id) || []).forEach(walk);
       };
       (kids.get(null) || []).forEach(walk);
@@ -2206,7 +2780,7 @@
     async function menuClick(itemId, tabId = menu.tabId) {
       const { groupId, port } = menu;
       const edit = (id2) => {
-        if (!state.groups[id2] || !port) return;
+        if (!homeOfGroup(id2) || !port) return;
         try {
           port.postMessage({ type: "editGroup", groupId: id2 });
         } catch {
@@ -2216,7 +2790,7 @@
       if (id === MENU.archiveTab) return handle({ type: "closeTab", tabId });
       if (id === MENU.moveNew) {
         await handle({ type: "newGroupForTab", tabId });
-        return edit(assign.get(tabId)?.groupId);
+        return edit(groupIdOfTab(tabId));
       }
       if (id.startsWith(MENU.moveTo)) {
         return handle({ type: "moveTab", tabId, groupId: id.slice(MENU.moveTo.length) });
@@ -2230,77 +2804,79 @@
       if (type) return handle({ type, groupId });
     }
     async function start() {
-      const stored = await browser2.storage.local.get(["groups", "archive", "settings", "counters", "log"]);
-      state.groups = stored.groups || {};
-      for (const g of Object.values(state.groups)) {
-        const root = state.groups[chain(state.groups, g.id)[0]];
-        if (!g.pinned || root === g) continue;
-        root.pinned = true;
-        g.pinned = false;
+      const stored = await browser2.storage.local.get(null);
+      settings = { ...DEFAULTS, ...stored.settings || {} };
+      const { legacy, ...loaded } = loadStore(stored, newId);
+      Object.assign(doc, loaded);
+      for (const [key, value] of Object.entries(stored)) {
+        if (isDocKey(key)) written.set(key, JSON.stringify(value));
       }
-      state.archive = stored.archive || [];
-      state.log = stored.log || [];
-      state.settings = { ...DEFAULTS, ...stored.settings || {} };
-      state.counters = { ...state.counters, ...stored.counters || {} };
+      if (!legacy) await dailySnapshot(backupOf(doc, now())).catch(reportError);
       const tabs = await browser2.tabs.query({});
-      for (const t of tabs) {
-        seen.set(t.id, t);
-        const v = await browser2.sessions.getTabValue(t.id, TAB_KEY).catch(() => null);
-        if (v && state.groups[v.groupId]) assign.set(t.id, v);
-        const name = await browser2.sessions.getTabValue(t.id, NAME_KEY).catch(() => null);
-        if (name) names.set(t.id, name);
-        const row = await browser2.sessions.getTabValue(t.id, ROW_KEY).catch(() => null);
-        if (Number.isInteger(row)) pinRows.set(t.id, row);
+      for (const windowId of windowsOf(tabs)) {
+        const saved = await browser2.sessions.getWindowValue(windowId, WS_KEY).catch(() => null);
+        active.set(windowId, space(saved) ? saved : activeOf(windowId));
+        if (!space(saved)) remember(windowId);
       }
-      gc();
+      await reconcile(tabs, legacy);
       browser2.tabs.onCreated.addListener((tab) => {
-        seen.set(tab.id, tab);
+        learnWindow(tab.windowId).catch(reportError);
+        track(tab);
         consider(tab);
         push();
       });
       browser2.tabs.onUpdated.addListener((tabId, change, tab) => {
-        seen.set(tabId, tab);
+        track(tab);
+        const e = byTab.get(tabId);
+        if (e) {
+          if ("pinned" in change && activeOf(tab.windowId) === e.ws && !!change.pinned !== !!e.rec.favorite) {
+            setFavorite(e.rec, !!change.pinned, space(e.ws));
+            save();
+          }
+          if (sync(e.rec, tab)) save();
+        }
         if (change.url || change.status === "complete" || change.title) consider(tab);
         push();
       });
       browser2.tabs.onRemoved.addListener((tabId) => {
-        const tab = seen.get(tabId);
-        seen.delete(tabId);
-        if (!archiving.delete(tabId) && tab && isSortable(tab)) record(tab);
-        assign.delete(tabId);
-        names.delete(tabId);
-        pinRows.delete(tabId);
+        const e = unbind(tabId);
         queue.delete(tabId);
+        if (e) {
+          space(e.ws).tabs = space(e.ws).tabs.filter((r) => r !== e.rec);
+          if (!archiving.delete(tabId)) shelve(e.ws, e.rec);
+        }
         gc();
         changed();
       });
-      browser2.tabs.onActivated.addListener(({ tabId }) => {
-        const a = assign.get(tabId);
-        if (a && state.groups[a.groupId]) {
-          expand(a.groupId);
-          save();
+      browser2.tabs.onActivated.addListener(({ tabId, windowId }) => {
+        const e = byTab.get(tabId);
+        if (e) {
+          if (windowId != null && activeOf(windowId) !== e.ws) {
+            switchWorkspace(windowId, e.ws, tabId).then(changed, reportError);
+          }
+          const groupId = groupIdOfTab(tabId);
+          if (groupId) {
+            expand(space(e.ws), groupId);
+            save();
+          }
         }
         push();
       });
       browser2.tabs.onMoved.addListener(push);
-      browser2.tabs.onAttached.addListener(push);
+      browser2.tabs.onAttached.addListener((tabId, info) => {
+        const e = byTab.get(tabId);
+        const wsId = info ? activeOf(info.newWindowId) : null;
+        if (e && wsId && wsId !== e.ws) handle({ type: "moveTabToWorkspace", tabId, wsId }).catch(reportError);
+        push();
+      });
       browser2.tabs.onDetached.addListener(push);
       browser2.tabs.onReplaced.addListener((added, removed) => {
-        if (seen.has(removed)) seen.set(added, { ...seen.get(removed), id: added });
-        seen.delete(removed);
-        const a = assign.get(removed);
-        if (a) {
-          assign.delete(removed);
-          setAssign(added, a.groupId, a.host, a.manual);
+        const e = unbind(removed);
+        if (e) {
+          bind(added, e.ws, e.rec);
+          stamp(added, e.rec.uid);
         }
-        if (names.has(removed)) {
-          setName(added, names.get(removed));
-          names.delete(removed);
-        }
-        if (pinRows.has(removed)) {
-          setPinRow(added, pinRows.get(removed));
-          pinRows.delete(removed);
-        }
+        if (queue.delete(removed)) queue.add(added);
         push();
       });
       browser2.runtime.onConnect.addListener((port) => {
@@ -2315,32 +2891,52 @@
             menu = { port, tabId: msg.tabId ?? null, groupId: msg.groupId ?? null };
             return;
           }
-          handle(msg).catch(reportError);
+          handle(msg).then(() => {
+            if (msg.type !== "newWorkspace") return;
+            try {
+              port.postMessage({ type: "editWorkspace", wsId: activeOf(msg.windowId) });
+            } catch {
+            }
+          }).catch(reportError);
         });
         push();
       });
       browser2.runtime.onMessage.addListener((msg) => {
-        if (msg.type === "exportWorkspace") return exportWorkspace();
+        if (msg.type === "exportWorkspace") return exportWorkspace(msg.windowId);
         if (msg.type === "importWorkspace") return importWorkspace(msg.data, msg.windowId);
+        if (msg.type === "exportBackup") return Promise.resolve(exportBackup());
+        if (msg.type === "restoreBackup") return restoreBackup(msg.data);
+        if (msg.type === "listSnapshots") return listSnapshots();
+        if (msg.type === "restoreSnapshot") return restoreSnapshot(msg.key);
         return handle(msg).catch(reportError);
       });
       browser2.storage.onChanged.addListener((changes, area) => {
         if (area !== "local" || !changes.settings) return;
-        state.settings = { ...DEFAULTS, ...changes.settings.newValue || {} };
+        settings = { ...DEFAULTS, ...changes.settings.newValue || {} };
         push();
         tidy().catch(reportError);
       });
       browser2.alarms.create("tidy", { periodInMinutes: 30 });
       browser2.alarms.onAlarm.addListener((alarm) => {
-        if (alarm.name === "tidy") tidy().catch(reportError);
+        if (alarm.name !== "tidy") return;
+        dailySnapshot().catch(reportError);
+        tidy().catch(reportError);
       });
+      const old = LEGACY_KEYS.filter((key) => key in stored);
+      if (old.length) {
+        await browser2.storage.local.set({ [LEGACY_KEY]: Object.fromEntries(old.map((key) => [key, stored[key]])) });
+      }
+      await flush();
+      if (old.length && !status.saveError) await browser2.storage.local.remove(old);
+      await arrangeAll();
       tabs.forEach(consider);
       await tidy();
     }
     function reportError(e) {
-      status.error = e && e.message || String(e);
+      status.error = messageOf(e);
       push();
     }
+    const current = () => space(activeOf());
     return {
       start,
       handle,
@@ -2351,10 +2947,34 @@
       moveTargets,
       exportWorkspace,
       importWorkspace,
+      exportBackup,
+      restoreBackup,
+      listSnapshots,
+      restoreSnapshot,
+      flush,
       menuClick: (itemId, tabId) => menuClick(itemId, tabId).catch(reportError),
-      state,
-      assign,
-      queue
+      queue,
+      doc,
+      // The workspace last chosen, and the open tabs' records by tab id.
+      state: {
+        get groups() {
+          return current().groups;
+        },
+        get archive() {
+          return archiveOf(current().id);
+        },
+        get log() {
+          return doc.log;
+        },
+        get settings() {
+          return settings;
+        }
+      },
+      assign: {
+        get: (tabId) => byTab.get(tabId)?.rec,
+        has: (tabId) => !!groupIdOfTab(tabId)
+      },
+      workspaceOf: (tabId) => byTab.get(tabId)?.ws
     };
   }
 
@@ -2413,9 +3033,9 @@
     return n;
   };
   var CREDENTIAL_OPTIONS = ["apiKey", "authToken", "credentials", "config", "profile"];
-  var safeJSON = (text) => {
+  var safeJSON = (text2) => {
     try {
-      return JSON.parse(text);
+      return JSON.parse(text2);
     } catch (err) {
       return void 0;
     }
@@ -3927,7 +4547,7 @@
       throw new AnthropicError(`Attempted to iterate over a response with no body`);
     }
     const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
-    let text = "";
+    let text2 = "";
     let endsWithCR = false;
     let event = null;
     let data = [];
@@ -3962,39 +4582,39 @@
       if (chunk == null)
         continue;
       const decoded = decoder.decode(typeof chunk === "string" ? encodeUTF8(chunk) : chunk, { stream: true });
-      text += decoded;
+      text2 += decoded;
       if (!endsWithCR && !decoded.includes("\n") && !decoded.includes("\r"))
         continue;
       let start = 0;
-      if (!text.includes("\r")) {
+      if (!text2.includes("\r")) {
         let end;
-        while ((end = text.indexOf("\n", start)) !== -1) {
-          const sse = takeLine(text.slice(start, end));
+        while ((end = text2.indexOf("\n", start)) !== -1) {
+          const sse = takeLine(text2.slice(start, end));
           start = end + 1;
           if (sse)
             yield sse;
         }
       } else {
-        for (let i = 0; i < text.length; i++) {
-          const char = text[i];
+        for (let i = 0; i < text2.length; i++) {
+          const char = text2[i];
           if (char !== "\n" && char !== "\r")
             continue;
-          if (char === "\r" && i + 1 === text.length)
+          if (char === "\r" && i + 1 === text2.length)
             break;
-          const sse = takeLine(text.slice(start, i));
-          if (char === "\r" && text[i + 1] === "\n")
+          const sse = takeLine(text2.slice(start, i));
+          if (char === "\r" && text2[i + 1] === "\n")
             i++;
           start = i + 1;
           if (sse)
             yield sse;
         }
       }
-      text = text.slice(start);
-      endsWithCR = text.endsWith("\r");
+      text2 = text2.slice(start);
+      endsWithCR = text2.endsWith("\r");
     }
-    text += decoder.decode();
-    if (text) {
-      for (const line of text.replace(/\r$/, "").split(/\r\n|[\n\r]/)) {
+    text2 += decoder.decode();
+    if (text2) {
+      for (const line of text2.replace(/\r$/, "").split(/\r\n|[\n\r]/)) {
         const sse = takeLine(line);
         if (sse)
           yield sse;
@@ -4942,8 +5562,8 @@
         const json = await response.json();
         return addResponseIDs(json, response);
       }
-      const text = await response.text();
-      return text;
+      const text2 = await response.text();
+      return text2;
     })().finally(() => {
       if (!props.options.stream && !props.options.__binaryResponse) {
         releaseRequestSignal(props.controller);
@@ -5218,8 +5838,8 @@
     };
     const values = {};
     const blocks = toolResult?.map((block) => JSON.stringify(block));
-    const length = [...stopSequences ?? [], ...blocks ?? []].reduce((sum, text) => sum + text.length + 1, 2) + serialize(others, values) + serialize(messages, values);
-    const sizeOf = 3 * length <= limit2 ? (text) => 3 * text.length : utf8Length;
+    const length = [...stopSequences ?? [], ...blocks ?? []].reduce((sum, text2) => sum + text2.length + 1, 2) + serialize(others, values) + serialize(messages, values);
+    const sizeOf = 3 * length <= limit2 ? (text2) => 3 * text2.length : utf8Length;
     const sizeOfMessages = () => Object.keys(messages).reduce((sum, key) => sum + sizeOf(values[key] ?? ""), 0);
     const stopSequencesSize = stopSequences?.reduce((sum, each) => sum + sizeOf(each), 0) ?? 0;
     const keepsStopSequences = stopSequences !== void 0 && stopSequencesSize <= limit2;
@@ -5338,15 +5958,15 @@
     }
     return { json: "[" + kept.join(",") + "]", size, truncated: kept.length < blocks.length };
   }
-  function utf8Length(text) {
+  function utf8Length(text2) {
     let size = 0;
-    for (let index = 0; index < text.length; index++) {
-      const unit = text.charCodeAt(index);
+    for (let index = 0; index < text2.length; index++) {
+      const unit = text2.charCodeAt(index);
       if (unit < 128) {
         size += 1;
       } else if (unit < 2048) {
         size += 2;
-      } else if (unit >= 55296 && unit < 56320 && (text.charCodeAt(index + 1) & 64512) === 56320) {
+      } else if (unit >= 55296 && unit < 56320 && (text2.charCodeAt(index + 1) & 64512) === 56320) {
         size += 4;
         index++;
       } else {
@@ -7460,13 +8080,13 @@ ${underline}`);
 
   // node_modules/@anthropic-ai/sdk/internal/utils/uuid.mjs
   var uuid4 = function() {
-    const { crypto: crypto2 } = globalThis;
-    if (crypto2?.randomUUID) {
-      uuid4 = crypto2.randomUUID.bind(crypto2);
-      return crypto2.randomUUID();
+    const { crypto: crypto3 } = globalThis;
+    if (crypto3?.randomUUID) {
+      uuid4 = crypto3.randomUUID.bind(crypto3);
+      return crypto3.randomUUID();
     }
     const u8 = new Uint8Array(1);
-    const randomByte = crypto2 ? () => crypto2.getRandomValues(u8)[0] : () => Math.random() * 255 & 255;
+    const randomByte = crypto3 ? () => crypto3.getRandomValues(u8)[0] : () => Math.random() * 255 & 255;
     return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (+c ^ randomByte() & 15 >> +c / 4).toString(16));
   };
 
@@ -7820,13 +8440,13 @@ ${underline}`);
   var LINE_UNSAFE = "\\x00-\\x1f\\x7f-\\x9f\\u061c\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
   var CONTROL_RE = /* @__PURE__ */ (() => new RegExp(`[${LINE_UNSAFE}]+`, "g"))();
   var LONE_SURROGATE_RE = /[\uD800-\uDFFF]/gu;
-  function wellFormed(text) {
-    return text.replace(LONE_SURROGATE_RE, "\uFFFD");
+  function wellFormed(text2) {
+    return text2.replace(LONE_SURROGATE_RE, "\uFFFD");
   }
   var FIELD_MAX = 4096;
   var LOG_MAX = 200;
-  function oneLine(text, limit2 = FIELD_MAX) {
-    return cutPoints(wellFormed(text).replace(CONTROL_RE, " ").trim(), limit2);
+  function oneLine(text2, limit2 = FIELD_MAX) {
+    return cutPoints(wellFormed(text2).replace(CONTROL_RE, " ").trim(), limit2);
   }
   function logSafe(name) {
     return oneLine(name, LOG_MAX);
@@ -7840,18 +8460,18 @@ ${underline}`);
   function errorText(error) {
     return cutPoints(wellFormed(thrownErrorText(error)), FIELD_MAX);
   }
-  function cutPoints(text, limit2) {
-    if (text.length <= limit2)
-      return text;
+  function cutPoints(text2, limit2) {
+    if (text2.length <= limit2)
+      return text2;
     let end = 0;
     let points = 0;
-    for (const ch of text) {
+    for (const ch of text2) {
       if (points === limit2)
         break;
       points += 1;
       end += ch.length;
     }
-    return text.slice(0, end);
+    return text2.slice(0, end);
   }
   function errorTextContent(content) {
     if (typeof content === "string")
@@ -26471,12 +27091,12 @@ Please migrate to a newer model. Visit https://docs.anthropic.com/en/docs/resour
     throw new WorkloadIdentityError(`Refusing to send credential over non-https token endpoint "${baseURL}"`);
   }
   async function parseTokenResponse(resp, requestId) {
-    const text = await readLimitedText(resp);
+    const text2 = await readLimitedText(resp);
     let data;
     try {
-      data = JSON.parse(text);
+      data = JSON.parse(text2);
     } catch {
-      throw new WorkloadIdentityError(`Token endpoint returned non-JSON response (status ${resp.status})`, resp.status, redactSensitive(text), requestId);
+      throw new WorkloadIdentityError(`Token endpoint returned non-JSON response (status ${resp.status})`, resp.status, redactSensitive(text2), requestId);
     }
     if (!data.access_token) {
       throw new WorkloadIdentityError(`Token endpoint response missing access_token: ${JSON.stringify(redactSensitive(data))}`, resp.status, redactSensitive(data), requestId);
@@ -26951,8 +27571,8 @@ Please migrate to a newer model. Visit https://docs.anthropic.com/en/docs/resour
       }
       const requestId = resp.headers.get("Request-Id");
       if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        const redacted = redactSensitive(text);
+        const text2 = await resp.text().catch(() => "");
+        const redacted = redactSensitive(text2);
         let hint = "";
         if (resp.status === 401) {
           const hintMiddle = config.workspaceId ? "" : "If your federation rule is scoped to multiple workspaces, set the ANTHROPIC_WORKSPACE_ID environment variable, the 'workspace_id' config key, or the `workspaceId` option. ";
@@ -27025,8 +27645,8 @@ Please migrate to a newer model. Visit https://docs.anthropic.com/en/docs/resour
       }
       const requestId = resp.headers.get("Request-Id");
       if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        throw new WorkloadIdentityError(`User OAuth refresh failed (HTTP ${resp.status}): ${redactSensitive(text)}`, resp.status, redactSensitive(text), requestId);
+        const text2 = await resp.text().catch(() => "");
+        throw new WorkloadIdentityError(`User OAuth refresh failed (HTTP ${resp.status}): ${redactSensitive(text2)}`, resp.status, redactSensitive(text2), requestId);
       }
       const data = await parseTokenResponse(resp, requestId);
       const expiresIn = Number(data.expires_in);
@@ -27474,8 +28094,8 @@ Please migrate to a newer model. Visit https://docs.anthropic.com/en/docs/resour
         const given = { apiKey, authToken, ...opts };
         const passed = CREDENTIAL_OPTIONS.filter((name) => given[name] != null);
         if (passed.length > 1) {
-          const list = (names) => names.map((name) => `\`${name}\``).join(", ");
-          throw new TypeError(`Pass at most one of ${list(CREDENTIAL_OPTIONS)}. Received ${list(passed)}.`);
+          const list2 = (names) => names.map((name) => `\`${name}\``).join(", ");
+          throw new TypeError(`Pass at most one of ${list2(CREDENTIAL_OPTIONS)}. Received ${list2(passed)}.`);
         }
         const [passedName] = passed;
         const env = passedName != null ? null : {
@@ -28517,9 +29137,9 @@ Output:
     if (response.stop_reason === "max_tokens") {
       throw new Error("AI sorting ran out of room. Sorted by site instead.");
     }
-    const text = response.content.find((b) => b.type === "text")?.text;
-    if (!text) throw new Error("AI sorting returned nothing. Sorted by site instead.");
-    return toPlan(JSON.parse(text), keys);
+    const text2 = response.content.find((b) => b.type === "text")?.text;
+    if (!text2) throw new Error("AI sorting returned nothing. Sorted by site instead.");
+    return toPlan(JSON.parse(text2), keys);
   }
 
   // src/background/index.js
