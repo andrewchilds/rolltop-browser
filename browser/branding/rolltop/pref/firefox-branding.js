@@ -126,3 +126,8 @@ pref("browser.aboutwelcome.enabled", false);
 pref("browser.preonboarding.enabled", false);
 pref("browser.uitour.enabled", false);
 pref("browser.startup.homepage_override.mstone", "ignore");
+
+// Reopen the previous session's windows and tabs on startup. Firefox's
+// default (1, the home page) restores only pinned tabs, so Rolltop would come
+// back with Favorites and none of its groups.
+pref("browser.startup.page", 3);
