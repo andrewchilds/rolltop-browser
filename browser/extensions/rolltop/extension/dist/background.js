@@ -1298,6 +1298,7 @@
   var MAX_DEPTH = 3;
   var MENU = {
     archiveTab: "rolltop-tab-archive",
+    groupTabs: "rolltop-tab-group",
     move: "rolltop-move",
     moveNew: "rolltop-move-new",
     moveSep: "rolltop-move-sep",
@@ -1350,6 +1351,9 @@
     if (subtree(groups, id, kids).includes(parentId)) return false;
     const height = (gid) => 1 + Math.max(0, ...(kids.get(gid) || []).map((k) => height(k.id)));
     return chain(groups, parentId).length + height(id) <= MAX_DEPTH;
+  }
+  function slotOf(subs, order) {
+    return order == null ? 0 : subs.filter((s) => s.order <= order).length;
   }
   function pathName(groups, id) {
     return chain(groups, id).map((x) => groups[x].name).join(" / ");
@@ -1767,7 +1771,7 @@
     let running = null;
     let importing = 0;
     let snapDay = "";
-    let menu = { port: null, tabId: null, groupId: null };
+    let menu = { port: null, tabId: null, groupId: null, tabIds: [] };
     const debounce = (fn, ms) => {
       let timer = null;
       return () => {
@@ -1878,6 +1882,7 @@
     function file(tabId, groupId, host, manual = false) {
       const e = byTab.get(tabId);
       if (!e) return;
+      if (e.rec.groupId !== groupId) delete e.rec.order;
       e.rec.groupId = groupId;
       e.rec.host = host;
       if (manual) e.rec.manual = true;
@@ -1885,6 +1890,7 @@
     }
     function unfile(rec) {
       rec.groupId = null;
+      delete rec.order;
       delete rec.host;
       delete rec.manual;
     }
@@ -2104,6 +2110,7 @@
           continue;
         }
         rec.groupId = mapped(rec.groupId);
+        delete rec.order;
         to.tabs.push(rec);
         const e = byTab.get(open.get(rec.uid));
         if (e) e.ws = to.id;
@@ -2138,6 +2145,7 @@
             // A private tab has no record; it shows in whichever workspace is open.
             ws: e ? e.ws : null,
             index: t.index,
+            order: rec ? rec.order ?? null : null,
             title: t.title || "",
             name: rec && rec.name || "",
             url: t.url || "",
@@ -2537,10 +2545,43 @@
       if (tab.index < near.index) index -= 1;
       if (index !== tab.index) await browser2.tabs.move(tab.id, { index });
     }
+    function setOrder(rec, order) {
+      if (order == null) delete rec.order;
+      else rec.order = order;
+    }
+    async function listedTabs(home, groupId, windowId) {
+      return (await browser2.tabs.query({})).filter((t) => {
+        const own = byTab.get(t.id);
+        return t.windowId === windowId && own && own.ws === home.id && own.rec.groupId === groupId && !own.rec.favorite;
+      }).sort((a, b) => a.index - b.index);
+    }
+    async function groupTabs(tabIds) {
+      const picked = [...new Set(tabIds)].filter((id) => byTab.has(id));
+      if (!picked.length) return null;
+      const { ws } = byTab.get(picked[0]);
+      const ids = picked.filter((id) => byTab.get(id).ws === ws);
+      const own = space(ws);
+      const res = applyPlan(own.groups, own.counters, {
+        newGroups: [{ ref: "new", name: "New group", label: "Custom", parent: null }],
+        assignments: ids.map((tabId) => ({ tabId, group: "new" }))
+      }, new Set(ids), makeGroupId);
+      const groupId = res.assign[ids[0]];
+      if (!groupId) return null;
+      own.groups = res.groups;
+      own.counters = res.counters;
+      own.groups[groupId].manual = true;
+      for (const id of ids) {
+        const tab = await browser2.tabs.get(id);
+        file(id, groupId, hostOf2(tab.url), true);
+        queue.delete(id);
+      }
+      return groupId;
+    }
     async function handle(msg) {
       const home = msg.groupId ? homeOfGroup(msg.groupId) : null;
       const g = home ? home.groups[msg.groupId] : null;
       const e = msg.tabId != null ? byTab.get(msg.tabId) : null;
+      let made = null;
       switch (msg.type) {
         case "activate": {
           const tab = await browser2.tabs.get(msg.tabId);
@@ -2611,51 +2652,104 @@
           else delete e.rec.name;
           break;
         }
+        // Drag and drop of a tab: into a group, and there beside one of its tabs
+        // (`nearTabId`) or one of its sub-groups (`nearGroupId`).
         case "moveTab": {
           if (!g || !e || e.ws !== home.id) break;
           const tab = await browser2.tabs.get(msg.tabId);
+          const nearTab = msg.nearTabId != null && msg.nearTabId !== tab.id ? byTab.get(msg.nearTabId) : null;
+          const subs = childMap(home.groups).get(g.id) || [];
+          const at = subs.indexOf(home.groups[msg.nearGroupId]);
           file(tab.id, g.id, hostOf2(tab.url), true);
           queue.delete(tab.id);
           expand(home, g.id);
-          if (msg.nearTabId != null) await placeBeside(tab, msg.nearTabId, msg.after);
+          if (nearTab && nearTab.ws === home.id && nearTab.rec.groupId === g.id) {
+            setOrder(e.rec, nearTab.rec.order);
+            await placeBeside(tab, msg.nearTabId, msg.after);
+          } else if (at >= 0) {
+            const slot = at + (msg.after ? 1 : 0);
+            setOrder(e.rec, slot ? subs[slot - 1].order : null);
+            const there = (await listedTabs(home, g.id, tab.windowId)).filter((t) => t.id !== tab.id && slotOf(subs, byTab.get(t.id).rec.order) === slot);
+            const near = msg.after ? there[0] : there[there.length - 1];
+            if (near) await placeBeside(tab, near.id, !msg.after);
+          }
           break;
         }
-        // Drag and drop of a group: beside another group, or into it.
+        // Several tabs dragged together: the first lands where a single tab
+        // would, and the rest follow it in the order given.
+        case "moveTabs": {
+          let prev = null;
+          for (const tabId of new Set(Array.isArray(msg.tabIds) ? msg.tabIds : [])) {
+            if (!byTab.has(tabId)) continue;
+            const { tabIds, ...first } = msg;
+            await handle(prev == null ? { ...first, type: "moveTab", tabId } : { type: "moveTab", windowId: msg.windowId, groupId: msg.groupId, tabId, nearTabId: prev, after: true });
+            if (groupIdOfTab(tabId) === msg.groupId) prev = tabId;
+          }
+          break;
+        }
+        // Drag and drop of a group: beside another group (`targetId`, `where`
+        // before or after), last in one (`where` into; no `targetId` for the top
+        // level), or beside a tab of the group it joins (`nearTabId`, `after`).
         case "moveGroup": {
-          const target = home ? home.groups[msg.targetId] : null;
-          if (!g || !target || g === target) break;
+          if (!g) break;
+          const target = msg.targetId != null ? home.groups[msg.targetId] : null;
+          const nearTab = msg.nearTabId != null ? byTab.get(msg.nearTabId) : null;
           const into = msg.where === "into";
-          const parentId = into ? target.id : target.parentId || null;
+          let parentId = null;
+          if (nearTab) {
+            if (nearTab.ws !== home.id || !home.groups[nearTab.rec.groupId]) break;
+            parentId = nearTab.rec.groupId;
+          } else if (msg.targetId != null) {
+            if (!target || g === target) break;
+            parentId = into ? target.id : target.parentId || null;
+          } else if (!into) {
+            break;
+          }
           if (!canNest(home.groups, g.id, parentId)) break;
           const sibs = (childMap(home.groups).get(parentId) || []).filter((s) => s !== g);
-          let prev = sibs[sibs.length - 1];
-          let next;
-          if (!into) {
-            const i = sibs.indexOf(target) + (msg.where === "after" ? 1 : 0);
-            prev = sibs[i - 1];
-            next = sibs[i];
+          let slot = sibs.length;
+          let split = 0;
+          let shown = [];
+          if (nearTab) {
+            slot = slotOf(sibs, nearTab.rec.order);
+            const near = await browser2.tabs.get(msg.nearTabId);
+            shown = (await listedTabs(home, parentId, near.windowId)).map((t) => byTab.get(t.id).rec);
+            split = shown.indexOf(nearTab.rec) + (msg.after ? 1 : 0);
+          } else if (!into) {
+            slot = sibs.indexOf(target) + (msg.where === "after" ? 1 : 0);
           }
+          const sharing = parentId == null ? [] : home.tabs.filter((r) => r.groupId === parentId && slotOf(sibs, r.order) === slot);
+          const prev = sibs[slot - 1];
+          const next = sibs[slot];
           g.order = prev && next ? (prev.order + next.order) / 2 : prev ? prev.order + 1 : next ? next.order - 1 : 1;
           g.parentId = parentId;
-          g.pinned = parentId == null && !!target.pinned;
-          if (into) expand(home, target.id);
+          for (const rec of sharing) {
+            const at = shown.indexOf(rec);
+            const before = nearTab ? at < 0 || at < split : msg.where !== "after";
+            setOrder(rec, before ? prev ? prev.order : null : g.order);
+          }
+          g.pinned = parentId == null && !!target && !!target.pinned;
+          if (parentId != null) expand(home, parentId);
           break;
         }
-        case "newGroupForTab": {
-          if (!e) break;
-          const own = space(e.ws);
-          const tab = await browser2.tabs.get(msg.tabId);
-          const res = applyPlan(own.groups, own.counters, {
-            newGroups: [{ ref: "new", name: "New group", label: "Custom", parent: null }],
-            assignments: [{ tabId: tab.id, group: "new" }]
-          }, /* @__PURE__ */ new Set([tab.id]), makeGroupId);
-          own.groups = res.groups;
-          own.counters = res.counters;
-          own.groups[res.assign[tab.id]].manual = true;
-          file(tab.id, res.assign[tab.id], hostOf2(tab.url), true);
-          queue.delete(tab.id);
+        // Several groups dragged together: the first lands where a single group
+        // would, and the rest follow it in the order given.
+        case "moveGroups": {
+          const { groupIds, ...first } = msg;
+          let prev = null;
+          for (const groupId of new Set(Array.isArray(groupIds) ? groupIds : [])) {
+            if (!homeOfGroup(groupId)) continue;
+            await handle(prev == null ? { ...first, type: "moveGroup", groupId } : { type: "moveGroup", windowId: msg.windowId, groupId, targetId: prev, where: "after" });
+            prev = groupId;
+          }
           break;
         }
+        case "newGroupForTab":
+          made = await groupTabs([msg.tabId]);
+          break;
+        case "groupTabs":
+          made = await groupTabs(Array.isArray(msg.tabIds) ? msg.tabIds : []);
+          break;
         case "archiveGroup": {
           if (!g) break;
           const ids = subtree(home.groups, g.id);
@@ -2759,6 +2853,7 @@
       }
       gc();
       changed();
+      return made;
     }
     function moveTargets(tabId) {
       const e = byTab.get(tabId);
@@ -2788,10 +2883,8 @@
       };
       const id = String(itemId);
       if (id === MENU.archiveTab) return handle({ type: "closeTab", tabId });
-      if (id === MENU.moveNew) {
-        await handle({ type: "newGroupForTab", tabId });
-        return edit(groupIdOfTab(tabId));
-      }
+      if (id === MENU.moveNew) return edit(await handle({ type: "newGroupForTab", tabId }));
+      if (id === MENU.groupTabs) return edit(await handle({ type: "groupTabs", tabIds: menu.tabIds }));
       if (id.startsWith(MENU.moveTo)) {
         return handle({ type: "moveTab", tabId, groupId: id.slice(MENU.moveTo.length) });
       }
@@ -2888,13 +2981,14 @@
             return;
           }
           if (msg.type === "menuTarget") {
-            menu = { port, tabId: msg.tabId ?? null, groupId: msg.groupId ?? null };
+            menu = { port, tabId: msg.tabId ?? null, groupId: msg.groupId ?? null, tabIds: msg.tabIds ?? [] };
             return;
           }
-          handle(msg).then(() => {
-            if (msg.type !== "newWorkspace") return;
+          handle(msg).then((made) => {
+            const edit = msg.type === "newWorkspace" ? { type: "editWorkspace", wsId: activeOf(msg.windowId) } : msg.type === "groupTabs" && made ? { type: "editGroup", groupId: made } : null;
+            if (!edit) return;
             try {
-              port.postMessage({ type: "editWorkspace", wsId: activeOf(msg.windowId) });
+              port.postMessage(edit);
             } catch {
             }
           }).catch(reportError);
@@ -29157,6 +29251,7 @@ Output:
   };
   var item = (id, title, contexts, extra = {}) => browser.menus.create({ id, title, contexts, ...sidebarOnly, ...extra });
   item(MENU.archiveTab, "Archive tab", ["tab"]);
+  item(MENU.groupTabs, "Group tabs", ["tab"], { visible: false });
   item(MENU.move, "Move to group", ["tab"]);
   item(MENU.moveNew, "New group", ["tab"], { parentId: MENU.move });
   item(MENU.moveSep, void 0, ["tab"], { parentId: MENU.move, type: "separator" });

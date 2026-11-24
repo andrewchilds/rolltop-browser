@@ -1,4 +1,4 @@
-import { buildView, canNest, MENU, PIN_MAX, UNGROUPED } from '../lib/model.js';
+import { buildView, canNest, chain, MENU, PIN_MAX, UNGROUPED } from '../lib/model.js';
 
 const $ = (id) => document.getElementById(id);
 const SVG = 'http://www.w3.org/2000/svg';
@@ -105,7 +105,7 @@ function groupNode(r) {
     r.sorting ? el('span', { class: 'chip' }, 'Sorting') : null,
   ];
   return el('div', {
-    class: `row group ${hueClass(r.hue)}${r.open ? ' open' : ''}${r.top ? ' top' : ''}${fixed ? ' static' : ''}${busy ? ' editing' : ''}`,
+    class: `row group ${hueClass(r.hue)}${selectedGroups.has(r.id) ? ' selected' : ''}${r.open ? ' open' : ''}${r.top ? ' top' : ''}${fixed ? ' static' : ''}${busy ? ' editing' : ''}`,
     style: `${hueStyle(r.hue)}padding-left:${r.depth * 14}px;opacity:${busy ? 1 : r.fade}`,
     data: fixed ? {} : { ctxGroup: r.id },
     draggable: fixed || busy ? null : 'true',
@@ -121,7 +121,7 @@ function tabNode(r) {
   const renaming = editingTab === r.tabId;
   const indent = `padding-left:${22 + r.depth * 14}px`;
   return el('div', {
-    class: `row tab ${hueClass(r.hue)}${r.current ? ' current' : ''}${renaming ? ' editing' : ''}`,
+    class: `row tab ${hueClass(r.hue)}${r.current ? ' current' : ''}${selected.has(r.tabId) ? ' selected' : ''}${renaming ? ' editing' : ''}`,
     style: `${hueStyle(r.hue)}opacity:${renaming ? 1 : r.fade}`,
     title: renaming ? null : r.title,
     data: { ctxTab: r.tabId, ...(r.groupId ? { ctxIn: r.groupId } : {}) },
@@ -186,8 +186,15 @@ const older = new Set(); // ids of the groups whose older tabs are being shown
 let editingTab = null; // id of the tab being renamed in its row or pinned tile
 let editingWs = null; // id of the workspace being renamed in the footer
 let menuTarget = null; // what this sidebar's open context menu was opened on
-let drag = null; // what is being dragged: { tabId }, { groupId } or { pinId } for a pinned tile
-let marked = null; // the drop target currently highlighted
+const selected = new Set(); // ids of the tabs whose rows are selected, to group together
+const selectedGroups = new Set(); // ids of the groups whose rows are selected; never alongside tabs
+let anchor = null; // id of the tab or group a Shift-click selects from
+let listed = []; // the list's tab rows, top to bottom
+let listedGroups = []; // ids of the list's groups, top to bottom, without Ungrouped
+let drag = null; // what is being dragged: { tabId }, { groupId } or { pinId } for a pinned tile;
+// with `tabIds` or `groupIds` too when the row is one of several selected, dragged together
+let marked = null; // the drop currently shown in the list
+const rowOf = new WeakMap(); // list node -> the view row it was built from
 let gap = null; // the drop zone open in the pin grid: { spot, zone, node }
 let pinLayout = ''; // the pin grid's rows of tab ids as last rendered, as JSON
 
@@ -202,6 +209,44 @@ function renameInput(value, label, maxlength) {
   });
   input.addEventListener('blur', () => finishRename(input, true));
   return input;
+}
+
+// Cmd- or Ctrl-click adds a row to the selection or takes it out. Shift-click
+// selects the rows of its kind from the last one picked (for a tab, else the
+// current tab's) to the one clicked. `set` is the selection the row belongs
+// to, tabs or groups, and `ids` every row of that kind, top to bottom.
+function pick(set, ids, id, range, start = anchor) {
+  (set === selected ? selectedGroups : selected).clear();
+  const from = ids.indexOf(start);
+  const to = ids.indexOf(id);
+  if (range && from >= 0 && to >= 0) {
+    set.clear();
+    ids.slice(Math.min(from, to), Math.max(from, to) + 1).forEach((x) => set.add(x));
+    return;
+  }
+  if (!set.delete(id)) set.add(id);
+  anchor = id;
+}
+
+function clearSelection() {
+  selected.clear();
+  selectedGroups.clear();
+  anchor = null;
+}
+
+// The selected tabs, top to bottom.
+const picked = () => listed.map((r) => r.tabId).filter((id) => selected.has(id));
+// The selected groups, top to bottom. One nested in another that is selected
+// goes wherever that one does.
+const pickedGroups = () => listedGroups.filter((id) => selectedGroups.has(id)
+  && !chain(snap.groups, id).slice(0, -1).some((up) => selectedGroups.has(up)));
+
+// The background answers with editGroup, to name the new group.
+function groupSelected() {
+  const tabIds = picked();
+  clearSelection();
+  if (tabIds.length) send('groupTabs', { tabIds });
+  render();
 }
 
 function finishRename(input, commit) {
@@ -298,6 +343,7 @@ function renderList(rows) {
         : group ? groupNode(r) : tabNode(r);
     const key = section ? 's:' + r.id : fold ? 'o:' + r.groupId : group ? 'g:' + r.id : 't:' + r.tabId;
     node.dataset.key = key;
+    rowOf.set(node, r);
     const was = old.get(key);
     if (animate && !was) node.classList.add('enter');
     if (animate && was && group && was.classList.contains('open') !== r.open) turned.push(node);
@@ -350,6 +396,16 @@ function render() {
     now: Date.now(),
   });
 
+  // Only rows in the list stay selected.
+  listed = view.searching ? [] : view.rows.filter((r) => r.kind === 'tab');
+  listedGroups = view.searching ? [] : view.rows.filter((r) => r.kind === 'group' && r.id !== UNGROUPED).map((r) => r.id);
+  for (const id of [...selected]) {
+    if (!listed.some((r) => r.tabId === id)) selected.delete(id);
+  }
+  for (const id of [...selectedGroups]) {
+    if (!listedGroups.includes(id)) selectedGroups.delete(id);
+  }
+
   $('browse').hidden = view.searching;
   $('results').hidden = !view.searching;
   if (view.searching) {
@@ -371,7 +427,7 @@ function render() {
         pinLayout = JSON.stringify(view.pinRows.map((row) => row.map((p) => p.tabId)));
         $('pins').replaceChildren(...view.pinRows.map((row) => el('div', { class: 'pin-row' }, ...row.map(pinNode))));
       }
-      const sig = JSON.stringify([view.rows, editing, editingTab]);
+      const sig = JSON.stringify([view.rows, editing, editingTab, [...selected], [...selectedGroups]]);
       if (sig !== listSig) {
         listSig = sig;
         renderList(view.rows);
@@ -447,6 +503,7 @@ function menuItems(button) {
   }
   const item = (act, text) => el('button', { type: 'button', role: 'menuitem', data: { act, tab } }, text);
   return ['Tab actions', [
+    selected.size > 1 && selected.has(Number(tab)) ? item('groupTabs', `Group ${selected.size} tabs`) : null,
     fav ? item('unpinTab', 'Remove from Favorites') : item('pinTab', 'Add to Favorites'),
     item('renameTab', 'Rename'),
     item('closeTab', 'Close tab'),
@@ -506,6 +563,20 @@ document.addEventListener('click', (event) => {
   // Any click closes the open menu; one on its own button does only that.
   const reopening = target && target === menuFor;
   hideMenu();
+  // A group's row, outside its arrow and its menu: selected like a tab's.
+  const groupRow = !target && snap && !event.target.closest('input')
+    ? event.target.closest('#list .row.group[data-ctx-group] .row-main') : null;
+  if (groupRow) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey) {
+      pick(selectedGroups, listedGroups, groupRow.parentNode.dataset.ctxGroup, event.shiftKey);
+    } else if (selected.size || selectedGroups.size) {
+      clearSelection();
+    } else {
+      return;
+    }
+    render();
+    return;
+  }
   if (!target || !snap || reopening) return;
   const { act, tab, group, archive, ws } = target.dataset;
   const tabId = tab ? Number(tab) : undefined;
@@ -530,7 +601,16 @@ document.addEventListener('click', (event) => {
       editing = null;
       editingTab = tabId;
       break;
-    case 'activate': clearSearch(); send('activate', { tabId }); break;
+    case 'activate':
+      if (target.closest('#list') && (event.metaKey || event.ctrlKey || event.shiftKey)) {
+        pick(selected, listed.map((r) => r.tabId), tabId, event.shiftKey, anchor ?? listed.find((r) => r.current)?.tabId);
+        break;
+      }
+      clearSelection();
+      clearSearch();
+      send('activate', { tabId });
+      break;
+    case 'groupTabs': groupSelected(); return;
     case 'closeTab': send('closeTab', { tabId }); break;
     case 'pinTab': send('pinTab', { tabId, pinned: true }); break;
     case 'unpinTab': send('pinTab', { tabId, pinned: false }); break;
@@ -579,6 +659,7 @@ document.addEventListener('auxclick', (event) => {
 // So is any open field.
 document.addEventListener('dblclick', (event) => {
   if (!snap || !event.target.closest || event.target.closest('.twist, input')) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey) return; // selecting rows
   const main = event.target.closest('#list .row-main, #pins .pin-main');
   if (!main) return;
   const groupId = main.parentNode.dataset.ctxGroup;
@@ -603,12 +684,29 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
+// With tabs selected, Cmd+G or Ctrl+G groups them; Escape lets any selection
+// go. Without, the keys keep their meaning in the browser (Find Again).
+document.addEventListener('keydown', (event) => {
+  if ((!selected.size && !selectedGroups.size) || menuFor || event.target.closest('input')) return;
+  if (event.key === 'Escape') {
+    clearSelection();
+    render();
+  } else if (selected.size && event.key.toLowerCase() === 'g' && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    groupSelected();
+  }
+});
+
 // ---- drag and drop -----------------------------------------------------------
-// A tab dropped on a group joins it; dropped on a tab it also takes the place
-// before or after it. A group dropped on the middle of a group nests in it;
-// on the top or bottom edge it becomes its sibling there. Over the pin grid a
-// tab or pinned tile opens a drop zone where it would land: within a row, the
-// tiles there squeezing aside, or as a row of its own. Dropping sets the grid.
+// In the list a drag shows a line between two rows, where the dragged tab or
+// group would land. Where that gap could belong to more than one group (below
+// the last row of a nested group, say), the pointer's x picks the level: the
+// line starts at the indent the pointer is over. A tab can take any place in a
+// group, among its tabs and its sub-groups alike. The middle of a group's row
+// drops into that group instead, which is the way into a collapsed one. Over
+// the pin grid a tab or pinned tile opens a drop zone where it would land:
+// within a row, the tiles there squeezing aside, or as a row of its own.
+// Dropping sets the grid.
 
 // A spot in the pin grid: in `row` before the tile `before` (last when null),
 // or, with no `row`, as a new row before the row `before` (at the end when null).
@@ -701,41 +799,125 @@ function applyPinLayout(rows) {
   }));
 }
 
+const INDENT = 14; // px per level of nesting, as the rows are drawn
+
+// How deep a row sits: 0 for a top-level group, and a group's tabs one level
+// below the group.
+const levelOf = (r) => (r.kind === 'group' ? r.depth : r.depth + 1);
+// The groups a row is in, from the top level down, a group's own id last.
+// Empty for what takes no drops: section names, Ungrouped and its tabs.
+const pathOf = (r) => (!r || r.kind === 'section' ? [] : chain(snap.groups, r.kind === 'group' ? r.id : r.groupId));
+
+// The places between two neighbouring rows, one per level of nesting from the
+// deepest (inside the row above) out to the level of the row below. Each is
+// { level, parentId, near, after }: in group `parentId` (null for the top
+// level), after or before `near`, a { tabId } or { groupId } there. Without
+// `near` there is nothing shown in the group to be beside.
+function spotsBetween(above, below) {
+  const path = pathOf(above);
+  if (above && above.kind !== 'section' && !path.length) return []; // under Ungrouped
+  const under = pathOf(below).length ? levelOf(below) : 0;
+  const deepest = above && above.kind === 'group' && !above.open ? path.length - 1 : path.length;
+  const spots = [];
+  for (let level = under; level <= deepest; level += 1) {
+    const spot = { level, parentId: level ? path[level - 1] : null, near: null, after: true };
+    if (level < path.length) {
+      spot.near = { groupId: path[level] }; // past the group the row above is in
+    } else if (above && above.kind === 'tab') {
+      spot.near = { tabId: above.tabId };
+    } else if (level === under && pathOf(below).length && below.kind !== 'older') {
+      // First in the group, or at the top of the list: ahead of the row below.
+      spot.near = below.kind === 'tab' ? { tabId: below.tabId } : { groupId: below.id };
+      spot.after = false;
+    }
+    spots.push(spot);
+  }
+  return spots;
+}
+
+// The drop a pointer over the list stands for: { node, where, x, parent, msg }.
+// `node` is the row to mark, `where` how (before or after it for a line
+// starting at `x`, or into it), `parent` the row of the group being joined.
+function listDrop(event) {
+  const list = $('list');
+  if (!list.contains(event.target)) return null;
+  const nodes = [...list.children].filter((n) => n.dataset.key); // not the rows sliding shut
+  const rects = nodes.map((n) => n.getBoundingClientRect());
+  const y = event.clientY;
+  let at = rects.findIndex((r) => y < r.top + r.height / 2);
+  if (at < 0) at = nodes.length;
+  const tabId = drag.tabId;
+  // The selected rows move as one, in the order they are listed.
+  const tabMove = (to) => (drag.tabIds ? ['moveTabs', { tabIds: drag.tabIds, ...to }] : ['moveTab', { tabId, ...to }]);
+  const groupMove = (to) => (drag.groupIds ? ['moveGroups', { groupIds: drag.groupIds, ...to }] : ['moveGroup', { groupId: drag.groupId, ...to }]);
+  const fits = (parentId) => (tabId != null ? parentId != null
+    : (drag.groupIds || [drag.groupId]).every((id) => canNest(snap.groups, id, parentId)));
+
+  // The middle of a group's row: into that group.
+  for (const i of [at - 1, at]) {
+    const row = rowOf.get(nodes[i]);
+    if (!row || row.kind !== 'group' || row.id === UNGROUPED || !fits(row.id)) continue;
+    const frac = (y - rects[i].top) / rects[i].height;
+    if (frac < 0.25 || frac >= 0.75) continue;
+    return {
+      node: nodes[i],
+      where: 'into',
+      msg: tabId != null
+        ? tabMove({ groupId: row.id })
+        : groupMove({ targetId: row.id, where: 'into' }),
+    };
+  }
+
+  const spots = spotsBetween(rowOf.get(nodes[at - 1]), rowOf.get(nodes[at])).filter((s) => fits(s.parentId));
+  if (!spots.length) return null;
+  // The level whose indent the pointer is over, or the nearest one on offer.
+  const want = Math.floor((event.clientX - list.getBoundingClientRect().left) / INDENT);
+  const spot = spots.reduce((best, s) => (Math.abs(s.level - want) < Math.abs(best.level - want) ? s : best));
+  const { parentId, near, after } = spot;
+  let msg;
+  if (tabId != null) {
+    const beside = !near ? {} : near.tabId != null ? { nearTabId: near.tabId, after } : { nearGroupId: near.groupId, after };
+    msg = tabMove({ groupId: parentId, ...beside });
+  } else if (near && near.tabId != null) {
+    msg = groupMove({ nearTabId: near.tabId, after });
+  } else if (near) {
+    msg = groupMove({ targetId: near.groupId, where: after ? 'after' : 'before' });
+  } else {
+    msg = groupMove({ targetId: parentId, where: 'into' });
+  }
+  // The line hangs off a full-width row: the one above where there is one.
+  const isRow = (n) => !!n && n.classList.contains('row');
+  const below = !isRow(nodes[at - 1]) && (isRow(nodes[at]) || !nodes[at - 1]);
+  return {
+    node: nodes[below ? at : at - 1],
+    where: below ? 'before' : 'after',
+    x: spot.level * INDENT,
+    parent: parentId ? nodes.find((n) => n.dataset.key === 'g:' + parentId) : null,
+    msg,
+  };
+}
+
 function dropFor(event) {
   if (!drag || !snap || !event.target.closest) return null;
-  if (drag.groupId == null) {
+  // Several tabs at once go to a group, not to the pin grid.
+  if (drag.groupId == null && !drag.tabIds) {
     const drop = pinDrop(event);
     if (drop || drag.pinId != null) return drop;
   }
-  const row = event.target.closest('#list .row');
-  if (!row) return null;
-  const { ctxTab, ctxGroup, ctxIn } = row.dataset;
-  const rect = row.getBoundingClientRect();
-  const y = (event.clientY - rect.top) / rect.height;
-  if (drag.tabId != null) {
-    if (ctxGroup) return { row, where: 'into', msg: ['moveTab', { tabId: drag.tabId, groupId: ctxGroup }] };
-    if (!ctxIn || Number(ctxTab) === drag.tabId) return null;
-    const after = y > 0.5;
-    return {
-      row,
-      where: after ? 'after' : 'before',
-      msg: ['moveTab', { tabId: drag.tabId, groupId: ctxIn, nearTabId: Number(ctxTab), after }],
-    };
-  }
-  if (!ctxGroup || ctxGroup === drag.groupId) return null;
-  const parentOf = (where) => (where === 'into' ? ctxGroup : snap.groups[ctxGroup].parentId || null);
-  let where = y < 0.25 ? 'before' : y > 0.75 ? 'after' : 'into';
-  // Too deep to nest here, or its own descendant: offer the nearer edge instead.
-  if (!canNest(snap.groups, drag.groupId, parentOf(where))) where = y < 0.5 ? 'before' : 'after';
-  if (!canNest(snap.groups, drag.groupId, parentOf(where))) return null;
-  return { row, where, msg: ['moveGroup', { groupId: drag.groupId, targetId: ctxGroup, where }] };
+  return listDrop(event);
 }
 
-// Highlights the list row a drop would land on. The pin grid shows its zone instead.
+// Shows the drop a pointer over the list stands for. The pin grid shows its zone instead.
 function markDrop(drop) {
-  if (marked) marked.row.classList.remove('drop-' + marked.where);
-  marked = drop && drop.row ? drop : null;
-  if (marked) marked.row.classList.add('drop-' + marked.where);
+  if (marked) {
+    marked.node.classList.remove('drop-' + marked.where);
+    if (marked.parent) marked.parent.classList.remove('drop-parent');
+  }
+  marked = drop && drop.node ? drop : null;
+  if (!marked) return;
+  marked.node.classList.add('drop-' + marked.where);
+  if (marked.where !== 'into') marked.node.style.setProperty('--drop-x', marked.x + 'px');
+  if (marked.parent) marked.parent.classList.add('drop-parent');
 }
 
 document.addEventListener('dragstart', (event) => {
@@ -743,9 +925,13 @@ document.addEventListener('dragstart', (event) => {
   if (!row) return;
   if (row.classList.contains('pin')) drag = { pinId: Number(row.dataset.ctxTab) };
   else drag = row.dataset.ctxTab ? { tabId: Number(row.dataset.ctxTab) } : { groupId: row.dataset.ctxGroup };
+  const together = selected.size > 1 && selected.has(drag.tabId);
+  if (together) drag.tabIds = picked();
+  if (selectedGroups.size > 1 && selectedGroups.has(drag.groupId)) drag.groupIds = pickedGroups();
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-rolltop-row', '1'); // Firefox needs some data to start a drag
   row.classList.add('dragging');
+  if (drag.tabIds || drag.groupIds) document.querySelectorAll('#list .row.selected').forEach((node) => node.classList.add('dragging'));
   // Deferred, as changing the layout inside dragstart can cancel the drag.
   requestAnimationFrame(() => {
     if (!drag) return;
@@ -757,7 +943,7 @@ document.addEventListener('dragstart', (event) => {
       row.classList.add('lifted');
       rowEl.classList.toggle('vacant', alone);
       setGap(alone ? { row: null, before: rowAfter(rowEl) } : { row: rowEl, before: row.nextElementSibling }, true);
-    } else if (drag.tabId != null && $('pins').hidden) {
+    } else if (drag.tabId != null && !drag.tabIds && $('pins').hidden) {
       // With nothing pinned there is no grid to drop on: show a zone for the drag.
       $('pins').hidden = false;
       setGap(END, true);
@@ -776,6 +962,7 @@ document.addEventListener('drop', (event) => {
   if (!drop) return;
   event.preventDefault();
   if (!drop.rows) {
+    if (drag.tabIds || drag.groupIds) clearSelection();
     send(...drop.msg);
   } else if (JSON.stringify(drop.rows) !== pinLayout) {
     applyPinLayout(drop.rows);
@@ -808,7 +995,9 @@ document.addEventListener('contextmenu', (event) => {
     return;
   }
   if (node.dataset.ctxTab) {
-    menuTarget = { tabId: Number(node.dataset.ctxTab) };
+    const tabId = Number(node.dataset.ctxTab);
+    // On one of several selected rows the menu offers to group them.
+    menuTarget = { tabId, tabIds: selected.size > 1 && selected.has(tabId) ? picked() : [] };
     browser.menus.overrideContext({ context: 'tab', tabId: menuTarget.tabId });
   } else {
     menuTarget = { groupId: node.dataset.ctxGroup };
@@ -818,9 +1007,16 @@ document.addEventListener('contextmenu', (event) => {
 }, { capture: true });
 
 // Every sidebar hears about every menu; only the one that was right-clicked
-// has a target. Tab menus need nothing here.
+// has a target.
 browser.menus.onShown.addListener(() => {
-  if (!menuTarget || menuTarget.tabId) return;
+  if (!menuTarget) return;
+  if (menuTarget.tabId) {
+    const count = menuTarget.tabIds.length;
+    if (!count) return;
+    browser.menus.update(MENU.groupTabs, { visible: true, title: `Group ${count} tabs` });
+    browser.menus.refresh();
+    return;
+  }
   const g = menuTarget.groupId ? snap.groups[menuTarget.groupId] : null;
   const visible = !!g;
   browser.menus.update(MENU.rename, { visible });
@@ -837,6 +1033,7 @@ browser.menus.onHidden.addListener(() => {
   if (!menuTarget.groupId && !menuTarget.tabId) {
     GROUP_ITEMS.forEach((id) => browser.menus.update(id, { visible: true }));
   }
+  if (menuTarget.tabId && menuTarget.tabIds.length) browser.menus.update(MENU.groupTabs, { visible: false });
   menuTarget = null;
 });
 
@@ -865,6 +1062,7 @@ function connect() {
       snap.groups = here.groups;
       snap.archiveCounts = here.archiveCounts;
       if (was !== here.id) {
+        clearSelection();
         editing = null;
         editingTab = null;
         older.clear();
@@ -877,6 +1075,7 @@ function connect() {
     } else if (msg.type === 'editGroup') {
       clearSearch();
       editingTab = null;
+      clearSelection();
       editing = msg.groupId; // its row may only arrive with the next snapshot
     } else {
       return;
