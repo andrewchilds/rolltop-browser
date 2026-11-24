@@ -1724,6 +1724,9 @@
   var SEARCH_LIMIT = 50;
   var LOG_CAP = 20;
   var AI_RECENT = 30 * DAY;
+  var SPLIT_AT = 8;
+  var SPLIT_STEP = 4;
+  var AI_RETRY_MAX = 15 * 6e4;
   var UID_KEY = "uid";
   var WS_KEY = "ws";
   var V1_TAB = "tidy";
@@ -1753,18 +1756,22 @@
   function createBackground({
     browser: browser2,
     classifyWithAI: classifyWithAI2,
+    splitWithAI: splitWithAI2,
     now = () => Date.now(),
     delay = {},
     // (prefix) -> a new id: 'w' workspace, 'g' group, 't' tab record, 'a' archive record.
     newId = randomId
   }) {
-    const wait = { classify: 1200, push: 50, save: 400, retry: 5e3, ...delay };
+    const wait = { classify: 1200, push: 50, save: 400, retry: 5e3, aiRetry: 6e4, ...delay };
     const doc = { meta: { version: 2, order: [], current: null }, spaces: {}, archives: {}, log: [] };
     let settings = { ...DEFAULTS };
     const byTab = /* @__PURE__ */ new Map();
     const open = /* @__PURE__ */ new Map();
     const active = /* @__PURE__ */ new Map();
     const queue = /* @__PURE__ */ new Set();
+    const missed = /* @__PURE__ */ new Set();
+    let aiRetry = null;
+    let aiFails = 0;
     const archiving = /* @__PURE__ */ new Set();
     const ports = /* @__PURE__ */ new Set();
     const status = { sorting: false, error: "", saveError: "" };
@@ -2204,6 +2211,27 @@
       queue.add(tab.id);
       scheduleClassify();
     }
+    function unsorted(tab) {
+      const e = byTab.get(tab.id);
+      if (!e || !isSortable(tab)) return false;
+      if (!isFiled(tab)) return true;
+      return missed.has(tab.id) && !e.rec.manual && !isHardPinned(space(e.ws).groups, e.rec.groupId);
+    }
+    function retryMissed() {
+      for (const id of [...missed]) {
+        if (byTab.has(id)) queue.add(id);
+        else missed.delete(id);
+      }
+      if (queue.size) runClassify();
+    }
+    function scheduleRetry() {
+      if (aiRetry) return;
+      aiRetry = setTimeout(() => {
+        aiRetry = null;
+        retryMissed();
+      }, Math.min(wait.aiRetry * 2 ** Math.max(0, aiFails - 1), AI_RETRY_MAX));
+      aiRetry.unref?.();
+    }
     function contextFor(home) {
       const groups = home.groups;
       const titles = /* @__PURE__ */ new Map();
@@ -2215,10 +2243,12 @@
         if (!titles.has(gid)) titles.set(gid, []);
         if (titles.get(gid).length < 6) titles.get(gid).push(title);
       };
-      home.tabs.forEach((rec) => add(rec.groupId, rec.title));
+      home.tabs.forEach((rec) => {
+        if (!rec.favorite) add(rec.groupId, rec.title);
+      });
       const cutoff = now() - AI_RECENT;
       archiveOf(home.id).forEach((a) => {
-        if (a.at >= cutoff) add(a.groupId, a.title);
+        if (a.at >= cutoff && !a.favorite) add(a.groupId, a.title);
       });
       const hidden = (g) => !!g.site && !g.manual;
       return Object.values(groups).filter((g) => relevant.has(g.id) && !hidden(g) && !isHardPinned(groups, g.id)).map((g) => ({
@@ -2254,18 +2284,22 @@
         ids.forEach((id) => queue.delete(id));
         const all = await browser2.tabs.query({});
         const inWs = (t) => byTab.get(t.id)?.ws === wsId;
-        const batch = all.filter((t) => ids.includes(t.id) && inWs(t) && isSortable(t) && !isFiled(t));
+        const batch = all.filter((t) => ids.includes(t.id) && inWs(t) && unsorted(t));
         if (!batch.length || !space(wsId)) continue;
         status.sorting = true;
         push();
-        const useAI = !!(settings.apiKey && classifyWithAI2);
+        const sendable = batch.filter((t) => !byTab.get(t.id).rec.favorite);
+        const useAI = !!(settings.apiKey && classifyWithAI2 && sendable.length);
         const model = settings.model || DEFAULTS.model;
         const context2 = useAI ? contextFor(space(wsId)) : [];
         const nameOf = (gid) => {
           const groups = space(wsId)?.groups || {};
           return groups[gid] ? pathName(groups, gid) : "";
         };
-        const fromOf = (t) => inWs({ id: t.openerTabId }) ? groupIdOfTab(t.openerTabId) : null;
+        const fromOf = (t) => {
+          const from = byTab.get(t.openerTabId);
+          return from && from.ws === wsId && !from.rec.favorite ? groupIdOfTab(t.openerTabId) : null;
+        };
         const before = new Map(Object.values(space(wsId).groups).map((g) => [g.id, g.name]));
         const entry = {
           at: now(),
@@ -2281,13 +2315,15 @@
           renames: []
         };
         let plan = null;
+        let failed = false;
+        let retry2 = false;
         if (useAI) {
           try {
             plan = await classifyWithAI2({
               apiKey: settings.apiKey,
               model,
               groups: context2,
-              tabs: batch.map((t) => {
+              tabs: sendable.map((t) => {
                 const from = fromOf(t);
                 return {
                   id: t.id,
@@ -2298,9 +2334,13 @@
               })
             });
             status.error = "";
+            aiFails = 0;
+            if (plan.usage) entry.usage = plan.usage;
           } catch (e) {
             status.error = messageOf(e);
             entry.error = status.error;
+            failed = true;
+            retry2 = !!(e && e.retry);
           }
         }
         const home = space(wsId);
@@ -2310,6 +2350,17 @@
         const done = plan ? apply(home, plan, batch, liveIds) : /* @__PURE__ */ new Set();
         const rest = batch.filter((t) => liveIds.has(t.id) && !done.has(t.id));
         const bySite = rest.length ? apply(home, heuristicPlan(rest, home.groups), rest, liveIds) : /* @__PURE__ */ new Set();
+        if (!failed) {
+          batch.forEach((t) => missed.delete(t.id));
+        } else {
+          sendable.forEach((t) => {
+            if (bySite.has(t.id)) missed.add(t.id);
+          });
+          if (retry2) {
+            aiFails += 1;
+            scheduleRetry();
+          }
+        }
         const reasons = new Map((plan && plan.assignments || []).map((a) => [a.tabId, a.reason || ""]));
         batch.forEach((t, i) => {
           const by = done.has(t.id) ? "ai" : bySite.has(t.id) ? "site" : "";
@@ -2325,6 +2376,83 @@
           const g = home.groups[id];
           if (g && g.name !== name) entry.renames.push({ from: name, to: g.name });
         });
+        doc.log = [entry, ...doc.log].slice(0, LOG_CAP);
+        if (plan && splitWithAI2) {
+          const touched = new Set([...done].map(groupIdOfTab).filter(Boolean));
+          await splitLarge(wsId, touched, model);
+        }
+      }
+    }
+    const looseIn = (home, groupId) => home.tabs.filter(
+      (r) => r.groupId === groupId && !r.manual && !r.favorite && open.has(r.uid)
+    );
+    async function splitLarge(wsId, groupIds, model) {
+      for (const gid of groupIds) {
+        const home = space(wsId);
+        const g = home && home.groups[gid];
+        if (!g || g.site && !g.manual || isHardPinned(home.groups, gid)) continue;
+        if (chain(home.groups, gid).length >= MAX_DEPTH) continue;
+        const recs = looseIn(home, gid);
+        if (recs.length < Math.max(SPLIT_AT, (g.splitAt || 0) + SPLIT_STEP)) continue;
+        const tabs = recs.map((r) => ({ id: open.get(r.uid), title: r.title || "", url: r.url }));
+        const subgroups = Object.values(home.groups).filter((x) => x.parentId === gid).map((x) => ({
+          id: x.id,
+          name: x.name,
+          label: x.label,
+          titles: home.tabs.filter((r) => r.groupId === x.id && !r.favorite).slice(0, 6).map((r) => r.title || "")
+        }));
+        const entry = {
+          at: now(),
+          workspace: home.name,
+          model,
+          error: "",
+          split: pathName(home.groups, gid),
+          considered: tabs.length,
+          groups: subgroups.map((x) => ({ name: x.name, label: x.label, titles: x.titles })),
+          tabs: [],
+          renames: []
+        };
+        let plan = null;
+        try {
+          plan = await splitWithAI2({
+            apiKey: settings.apiKey,
+            model,
+            group: { id: g.id, name: g.name, label: g.label },
+            subgroups,
+            tabs
+          });
+          if (plan.usage) entry.usage = plan.usage;
+        } catch (e) {
+          entry.error = messageOf(e);
+        }
+        const after = space(wsId);
+        if (plan && after && after.groups[gid]) {
+          const still = (id) => {
+            const e = byTab.get(id);
+            return !!e && e.ws === wsId && e.rec.groupId === gid && !e.rec.manual && !e.rec.favorite;
+          };
+          const before = new Set(Object.keys(after.groups));
+          const res = applyPlan(after.groups, after.counters, plan, new Set(tabs.map((t) => t.id).filter(still)), makeGroupId);
+          after.groups = res.groups;
+          after.counters = res.counters;
+          const moves = tabs.map((t) => ({ t, to: res.assign[t.id] })).filter((m) => m.to && res.groups[m.to].parentId === gid);
+          const size = /* @__PURE__ */ new Map();
+          moves.forEach((m) => size.set(m.to, (size.get(m.to) || 0) + 1));
+          for (const { t, to } of moves) {
+            if (!before.has(to) && size.get(to) < 2) continue;
+            file(t.id, to, byTab.get(t.id).rec.host);
+            entry.tabs.push({
+              title: t.title,
+              url: logUrl(t.url),
+              openedFrom: "",
+              by: "ai",
+              group: pathName(after.groups, to),
+              created: !before.has(to),
+              reason: ""
+            });
+          }
+          after.groups[gid].splitAt = looseIn(after, gid).length;
+        }
         doc.log = [entry, ...doc.log].slice(0, LOG_CAP);
       }
     }
@@ -2346,8 +2474,14 @@
       tabs.filter(isSortable).forEach((t) => {
         const e = byTab.get(t.id);
         if (!e || e.rec.manual) return;
+        if (e.rec.groupId && isHardPinned(space(e.ws).groups, e.rec.groupId)) return;
         unfile(e.rec);
         queue.add(t.id);
+      });
+      Object.values(doc.spaces).forEach((s) => {
+        Object.values(s.groups).forEach((g) => {
+          delete g.splitAt;
+        });
       });
       await runClassify();
       if (queue.size) await runClassify();
@@ -2929,11 +3063,17 @@
           if (sync(e.rec, tab)) save();
         }
         if (change.url || change.status === "complete" || change.title) consider(tab);
+        if ("pinned" in change && e && !e.rec.favorite && settings.apiKey && groupIdOfTab(tabId)) {
+          missed.add(tabId);
+          queue.add(tabId);
+          scheduleClassify();
+        }
         push();
       });
       browser2.tabs.onRemoved.addListener((tabId) => {
         const e = unbind(tabId);
         queue.delete(tabId);
+        missed.delete(tabId);
         if (e) {
           space(e.ws).tabs = space(e.ws).tabs.filter((r) => r !== e.rec);
           if (!archiving.delete(tabId)) shelve(e.ws, e.rec);
@@ -2970,6 +3110,7 @@
           stamp(added, e.rec.uid);
         }
         if (queue.delete(removed)) queue.add(added);
+        if (missed.delete(removed)) missed.add(added);
         push();
       });
       browser2.runtime.onConnect.addListener((port) => {
@@ -3006,8 +3147,10 @@
       });
       browser2.storage.onChanged.addListener((changes, area) => {
         if (area !== "local" || !changes.settings) return;
+        const was = settings;
         settings = { ...DEFAULTS, ...changes.settings.newValue || {} };
         push();
+        if (settings.apiKey && (settings.apiKey !== was.apiKey || settings.model !== was.model)) retryMissed();
         tidy().catch(reportError);
       });
       browser2.alarms.create("tidy", { periodInMinutes: 30 });
@@ -6284,14 +6427,14 @@
         } catch (problem) {
           loggerFor(client).debug("could not record the stream on its span", problem);
         }
-        const failure = call?.failure;
-        if (!sawStop && call?.streamed && failure === void 0) {
+        const failure2 = call?.failure;
+        if (!sawStop && call?.streamed && failure2 === void 0) {
           recordStreamedMessageContent(client, call, call.streamed.body, call.streamed.message);
         }
         if (end.reason === "failed") {
           setErrorStatus(span, end.error);
-        } else if (failure !== void 0) {
-          setErrorStatus(span, failure, "client_error");
+        } else if (failure2 !== void 0) {
+          setErrorStatus(span, failure2, "client_error");
         } else if (end.reason === "completed") {
           if (sawStop) {
             span.setStatus({ code: SpanStatusCode.OK });
@@ -29139,6 +29282,48 @@ Output:
       }
     }
   };
+  var SPLIT_SYSTEM = `You keep a browser's tab sidebar organized so its owner never has to.
+
+One group has grown large. You receive the group, the sub-groups it already has, and the tabs sitting directly in it. Decide whether some of those tabs form sub-topics of the group that would be easier to scan under their own heading.
+
+How to split:
+- A sub-group is a narrower part of what the group is about: a trip's lodging, a purchase's reviews, a project's bug reports. Split by what the person is doing, not by website.
+- A new sub-group needs at least three tabs. Move a tab into an existing sub-group when it fits one.
+- Leave a tab where it is when it belongs to no cluster. Most groups keep some tabs directly in them, and moving nothing is a fine answer when the group is simply one topic.
+- Prefer two to four sub-groups over many small ones.
+
+Naming:
+- "name" is two to four words, specific, in sentence case, and does not repeat the parent group's name: under "Kyoto in spring", use "Places to stay", not "Kyoto places to stay".
+- "label" is one word for the kind of activity, usually the parent's label.
+
+Output:
+- "new_groups": sub-groups to create. "ref" is any id you invent that is not an existing id.
+- "moves": only the tabs that move. "group" is an existing sub-group id or a new sub-group's ref.`;
+  var SPLIT_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["new_groups", "moves"],
+    properties: {
+      new_groups: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["ref", "name", "label"],
+          properties: { ref: { type: "string" }, name: { type: "string" }, label: { type: "string" } }
+        }
+      },
+      moves: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["tab", "group"],
+          properties: { tab: { type: "string" }, group: { type: "string" } }
+        }
+      }
+    }
+  };
   var FALLBACK_MODELS = /* @__PURE__ */ new Set([
     "claude-fable-5-2",
     "claude-fable-5-1",
@@ -29154,6 +29339,18 @@ Output:
       return "";
     }
   }
+  function tabRows(tabs, keys) {
+    return tabs.map((t, i) => {
+      const key = "t" + (i + 1);
+      keys.set(key, t.id);
+      return {
+        tab: key,
+        title: t.title.slice(0, 160),
+        url: publicUrl(t.url),
+        ...t.openerGroupId ? { opened_from: t.openerGroupId } : {}
+      };
+    });
+  }
   function buildPayload(tabs, groups) {
     const keys = /* @__PURE__ */ new Map();
     const payload = {
@@ -29164,16 +29361,16 @@ Output:
         parent: g.parentId || null,
         tabs: g.titles
       })),
-      tabs: tabs.map((t, i) => {
-        const key = "t" + (i + 1);
-        keys.set(key, t.id);
-        return {
-          tab: key,
-          title: t.title.slice(0, 160),
-          url: publicUrl(t.url),
-          ...t.openerGroupId ? { opened_from: t.openerGroupId } : {}
-        };
-      })
+      tabs: tabRows(tabs, keys)
+    };
+    return { payload, keys };
+  }
+  function buildSplitPayload(group, subgroups, tabs) {
+    const keys = /* @__PURE__ */ new Map();
+    const payload = {
+      group: { id: group.id, name: group.name, label: group.label },
+      subgroups: subgroups.map((g) => ({ id: g.id, name: g.name, label: g.label, tabs: g.titles })),
+      tabs: tabRows(tabs, keys)
     };
     return { payload, keys };
   }
@@ -29193,51 +29390,87 @@ Output:
       }))
     };
   }
-  async function classifyWithAI({ apiKey, model, tabs, groups }) {
-    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true, timeout: 9e4 });
-    const { payload, keys } = buildPayload(tabs, groups);
+  function toSplitPlan(output, keys, groupId) {
+    return {
+      newGroups: (output.new_groups || []).map((g) => ({
+        ref: g.ref,
+        name: g.name,
+        label: g.label,
+        parent: groupId
+      })),
+      assignments: (output.moves || []).filter((m) => keys.has(m.tab)).map((m) => ({ tabId: keys.get(m.tab), group: m.group })),
+      renames: []
+    };
+  }
+  function failure(message, retry = false) {
+    return Object.assign(new Error(message), { retry });
+  }
+  async function ask({ apiKey, model, system, schema, payload }) {
+    const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true, timeout: 6e4, maxRetries: 1 });
     const useFallback = FALLBACK_MODELS.has(model);
+    const started = Date.now();
     let response;
     try {
       response = await client.beta.messages.create({
         model,
         max_tokens: 16e3,
-        system: SYSTEM,
-        output_config: { effort: "low", format: { type: "json_schema", schema: SCHEMA } },
+        system,
+        output_config: { effort: "low", format: { type: "json_schema", schema } },
         ...useFallback ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" } : {},
         messages: [{ role: "user", content: JSON.stringify(payload) }]
       });
     } catch (error) {
       if (error instanceof Anthropic.AuthenticationError) {
-        throw new Error("AI sorting is off: the API key was rejected.");
+        throw failure("AI sorting is off: the API key was rejected.");
       }
       if (error instanceof Anthropic.PermissionDeniedError || error instanceof Anthropic.NotFoundError) {
-        throw new Error(`AI sorting is off: this key cannot use the model "${model}".`);
+        throw failure(`AI sorting is off: this key cannot use the model "${model}".`);
       }
       if (error instanceof Anthropic.RateLimitError) {
-        throw new Error("AI sorting is rate limited. Sorted by site for now.");
+        throw failure("AI sorting is rate limited. Sorted by site for now.", true);
       }
       if (error instanceof Anthropic.APIConnectionError) {
-        throw new Error("AI sorting could not reach the API. Sorted by site for now.");
+        throw failure("AI sorting could not reach the API. Sorted by site for now.", true);
       }
       if (error instanceof Anthropic.APIError) {
-        throw new Error(`AI sorting failed (${error.status}). Sorted by site for now.`);
+        throw failure(`AI sorting failed (${error.status}). Sorted by site for now.`, error.status >= 500);
       }
       throw error;
     }
     if (response.stop_reason === "refusal") {
-      throw new Error("The model declined to sort these tabs. Sorted by site instead.");
+      throw failure("The model declined to sort these tabs. Sorted by site instead.");
     }
     if (response.stop_reason === "max_tokens") {
-      throw new Error("AI sorting ran out of room. Sorted by site instead.");
+      throw failure("AI sorting ran out of room. Sorted by site instead.");
     }
     const text2 = response.content.find((b) => b.type === "text")?.text;
-    if (!text2) throw new Error("AI sorting returned nothing. Sorted by site instead.");
-    return toPlan(JSON.parse(text2), keys);
+    if (!text2) throw failure("AI sorting returned nothing. Sorted by site instead.");
+    const u = response.usage || {};
+    return {
+      output: JSON.parse(text2),
+      usage: {
+        // Everything read as input, cached or not; output includes thinking.
+        input: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+        output: u.output_tokens || 0,
+        ms: Date.now() - started,
+        // Differs from the model asked for when a refusal fallback answered.
+        model: response.model || model
+      }
+    };
+  }
+  async function classifyWithAI({ apiKey, model, tabs, groups }) {
+    const { payload, keys } = buildPayload(tabs, groups);
+    const { output, usage } = await ask({ apiKey, model, system: SYSTEM, schema: SCHEMA, payload });
+    return { ...toPlan(output, keys), usage };
+  }
+  async function splitWithAI({ apiKey, model, group, subgroups, tabs }) {
+    const { payload, keys } = buildSplitPayload(group, subgroups, tabs);
+    const { output, usage } = await ask({ apiKey, model, system: SPLIT_SYSTEM, schema: SPLIT_SCHEMA, payload });
+    return { ...toSplitPlan(output, keys, group.id), usage };
   }
 
   // src/background/index.js
-  var background = createBackground({ browser, classifyWithAI });
+  var background = createBackground({ browser, classifyWithAI, splitWithAI });
   background.start().catch((e) => console.error("Rolltop failed to start", e));
   browser.browserAction.onClicked.addListener(() => browser.sidebarAction.toggle());
   browser.menus.create({
