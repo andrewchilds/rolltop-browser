@@ -1773,6 +1773,7 @@
     let aiRetry = null;
     let aiFails = 0;
     const archiving = /* @__PURE__ */ new Set();
+    const closed = /* @__PURE__ */ new Set();
     const ports = /* @__PURE__ */ new Set();
     const status = { sorting: false, error: "", saveError: "" };
     let running = null;
@@ -1951,7 +1952,7 @@
       if (a.row != null) rec.row = a.row;
     }
     function track(tab) {
-      if (!tracked(tab) || tab.id == null || byTab.has(tab.id)) return;
+      if (!tracked(tab) || tab.id == null || byTab.has(tab.id) || closed.has(tab.id)) return;
       const home = space(activeOf(tab.windowId));
       const rec = makeRec(tab);
       home.tabs.push(rec);
@@ -2134,7 +2135,11 @@
       for (const g of moving) delete from.groups[g.id];
     }
     async function snapshot() {
-      const tabs = await browser2.tabs.query({});
+      const listed = await browser2.tabs.query({});
+      for (const id of [...closed]) {
+        if (!listed.some((t) => t.id === id)) closed.delete(id);
+      }
+      const tabs = listed.filter((t) => !closed.has(t.id));
       const activeMap = {};
       windowsOf(tabs).forEach((windowId) => {
         activeMap[windowId] = activeOf(windowId);
@@ -3072,6 +3077,7 @@
       });
       browser2.tabs.onRemoved.addListener((tabId) => {
         const e = unbind(tabId);
+        closed.add(tabId);
         queue.delete(tabId);
         missed.delete(tabId);
         if (e) {
