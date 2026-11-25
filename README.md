@@ -1,6 +1,16 @@
-# Rolltop
+<h1><img src="./browser/branding/rolltop/content/about-logo.svg" alt="" width="64" align="absmiddle"> Rolltop</h1>
 
-Rolltop is a web browser for macOS, built as a small fork of Firefox ESR. It replaces the tab strip with a sidebar that groups, labels and archives your tabs for you.
+Rolltop is a minimalist web browser for macOS, built as a small fork of Firefox ESR. It replaces the tab strip with a sidebar that automatically groups, labels and archives your tabs for you.
+
+The tabs sidebar is split into three sections: favorites, pinned, and browsing.
+
+Rolltop in light mode:
+
+![Rolltop in light mode: a favorites grid, pinned groups and browsing groups in the sidebar](./docs/readme/rolltop-light.png)
+
+Rolltop in dark mode:
+
+![Rolltop in dark mode with a second example profile](./docs/readme/rolltop-dark.png)
 
 ## Download
 
