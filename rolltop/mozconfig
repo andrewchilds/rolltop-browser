@@ -2,3 +2,8 @@
 # upstream's .gitignore; it sources this file and adds local-only options.
 mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-rolltop
 ac_add_options --with-branding=browser/branding/rolltop
+
+# Makes the macOS bundle ID computer.subtractive.rolltop instead of
+# org.mozilla.rolltop. The ID in
+# security/mac/hardenedruntime/production/rolltop.browser.xml must match.
+ac_add_options --with-distribution-id=computer.subtractive

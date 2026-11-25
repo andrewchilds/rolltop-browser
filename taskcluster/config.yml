@@ -977,7 +977,7 @@ mac-signing:
                           default:
                               by-project:
                                   mozilla-central: public/build/security/nightly.browser.xml
-                                  default: public/build/security/firefox.browser.xml
+                                  default: public/build/security/rolltop.browser.xml
                   globs:
                       - "/"  # The .app
 
