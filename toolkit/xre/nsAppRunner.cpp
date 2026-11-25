@@ -2245,7 +2245,8 @@ static void DumpHelp() {
 }
 
 static inline void DumpVersion() {
-  if (gAppData->vendor && *gAppData->vendor) {
+  if (gAppData->vendor && *gAppData->vendor &&
+      strcmp(gAppData->vendor, gAppData->name) != 0) {
     printf("%s ", (const char*)gAppData->vendor);
   }
   printf("%s ", (const char*)gAppData->name);
@@ -2261,7 +2262,8 @@ static inline void DumpVersion() {
 }
 
 static inline void DumpFullVersion() {
-  if (gAppData->vendor && *gAppData->vendor) {
+  if (gAppData->vendor && *gAppData->vendor &&
+      strcmp(gAppData->vendor, gAppData->name) != 0) {
     printf("%s ", (const char*)gAppData->vendor);
   }
   printf("%s ", (const char*)gAppData->name);
